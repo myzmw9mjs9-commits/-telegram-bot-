@@ -1,0 +1,5 @@
+nest_asyncio
+python-telegram-bot
+ccxt
+pandas
+scikit-learn
