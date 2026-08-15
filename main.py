@@ -23,9 +23,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# توكن البوت
-TOKEN = "8811018278:AAGoRyUdg8L_FqSne"
-
+# توكن 
+TOKEN = "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4"
 # محاكاة محفظة المستخدم
 portfolio = {
     "usd": 1000.0,
