@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 
 # توكن البوت
-TOKEN = "8811018278:AAGoRyUdg8L_FqSne..."
+TOKEN = "8811018278:AAGoRyUdg8L_FqSne"
 
 # محاكاة محفظة المستخدم
 portfolio = {
