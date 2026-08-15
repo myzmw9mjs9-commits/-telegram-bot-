@@ -1,7 +1,21 @@
 import logging
 import requests
+import os
+from threading import Thread
+from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+# خادم ويب مصغر لإرضاء Render
+app_web = Flask('')
+
+@app_web.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app_web.run(host='0.0.0.0', port=port)
 
 # إعداد السجلات
 logging.basicConfig(
@@ -9,8 +23,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# توكن البوت الخاص بك
+# توكن البوت
 TOKEN = "8811018278:AAGoRyUdg8L_FqSne..."
+
 # محاكاة محفظة المستخدم
 portfolio = {
     "usd": 1000.0,
@@ -23,8 +38,6 @@ def get_crypto_data():
         url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
         response = requests.get(url).json()
         price = response["bitcoin"]["usd"]
-        
-        # قيم تقريبية للمؤشرات للتحليل الفني
         rsi = 17.2  
         macd = -36.19
         return price, rsi, macd
@@ -82,12 +95,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "خطأ في الاتصال بالسوق."
         await update.message.reply_text(msg)
 
-# تشغيل التطبيق
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
+    # تشغيل خادم الويب في الخلفية
+    Thread(target=run_web).start()
     
+    # تشغيل البوت
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     app.run_polling()
+
+
+
 
