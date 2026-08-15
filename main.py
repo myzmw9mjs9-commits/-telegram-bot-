@@ -13,9 +13,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# التوكن من متغيرات البيئة أو المباشر
+# التوكن المباشر المضمون
 # ============================================================
-TOKEN = os.getenv("BOT_TOKEN", "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4").strip()
+TOKEN = "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4"
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
