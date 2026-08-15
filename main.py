@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 # ============================================================
 # التوكن المباشر المضمون
-# ============================================================
-TOKEN = "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4"
+# ============================================================ 
+TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
