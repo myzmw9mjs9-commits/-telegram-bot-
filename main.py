@@ -6,25 +6,24 @@ import telebot
 from telebot import types
 from flask import Flask
 
-# 1. جلب التوكن وتنظيف المسافات
+# 1. جلب التوكن
 RAW_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 if not RAW_TOKEN:
-    raise Exception("❌ TELEGRAM_BOT_TOKEN غير موجود في متغيرات Render")
+    raise Exception("❌ TELEGRAM_BOT_TOKEN غير موجود")
 
 TOKEN = RAW_TOKEN.strip()
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 app = Flask(__name__)
 
-# 2. بيانات المحفظة (قابلة للتعديل من المستخدم)
+# 2. بيانات المحفظة
 portfolio = {
-    "usd": 1000.0,  # الرصيد الافتراضي
+    "usd": 1000.0,
     "btc": 0.0
 }
 
-# 3. جلب سعر البيتكوين عبر CoinDesk API المضمون
+# 3. دالة جلب السعر المضمونة
 def get_btc_price():
     headers = {"User-Agent": "Mozilla/5.0"}
-    # المصدر الأول: CoinDesk (مضمون 100% على Render)
     try:
         url = "https://api.coindesk.com/v1/bpi/currentprice.json"
         res = requests.get(url, headers=headers, timeout=5).json()
@@ -32,7 +31,6 @@ def get_btc_price():
     except Exception:
         pass
 
-    # المصدر الثاني: CoinGecko احتياطي
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
         res = requests.get(url, headers=headers, timeout=5).json()
@@ -40,12 +38,12 @@ def get_btc_price():
     except Exception:
         return None
 
-# 4. الصفحة الرئيسية لخدمة Render
+# 4. خدمة Render
 @app.route('/')
 def index():
     return "البوت يعمل بنجاح ✅"
 
-# 5. أمر /start وإظهار الأزرار
+# 5. أمر /start
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -57,12 +55,11 @@ def send_welcome(message):
 
     msg = (
         "أهلاً بك في بوت التداول بالذكاء الاصطناعي! 🤖\n\n"
-        "💡 *طريقة تغيير الرصيد:* أرسل الأمر مع الرقم بالشكل التالي:\n"
-        "`/set_usd 500` (لتحديد رصيدك إلى 500 دولار)"
+        "💡 *تعديل الرصيد:* أرسل مثلاً `/set_usd 500`"
     )
     bot.reply_to(message, msg, reply_markup=markup)
 
-# 6. أمر تغيير رصيد الدولار حسب رغبتك
+# 6. أمر تحديد الرصيد
 @bot.message_handler(commands=['set_usd'])
 def set_usd_balance(message):
     try:
@@ -70,13 +67,13 @@ def set_usd_balance(message):
         if len(args) > 1:
             new_amount = float(args[1])
             portfolio["usd"] = new_amount
-            bot.reply_to(message, f"✅ تم تحديث رصيد الدولار في محفظتك إلى: `{new_amount:.2f} $`")
+            bot.reply_to(message, f"✅ تم تحديث رصيد الدولار في محفظتك إلى:\n`$ {new_amount:.2f}`")
         else:
-            bot.reply_to(message, "⚠️ يرجى كتابة المبلغ بعد الأمر، مثال:\n`/set_usd 2500`")
+            bot.reply_to(message, "⚠️ اكتب المبلغ بعد الأمر، مثال:\n`/set_usd 500`")
     except ValueError:
-        bot.reply_to(message, "❌ يرجى كتابة رقم صحيح بعد الأمر، مثال:\n`/set_usd 500`")
+        bot.reply_to(message, "❌ اكتب رقماً صحيحاً، مثال:\n`/set_usd 500`")
 
-# 7. معالجة الضغط على الأزرار
+# 7. معالجة جميع الأزرار (تم إصلاح زر الصفقة هنا)
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     text = message.text.strip()
@@ -91,7 +88,7 @@ def handle_all_messages(message):
                 f"🤖 *التوصية:* انتظار فرصة اختراق المقاومة"
             )
         else:
-            msg = "❌ تعذر جلب السعر من جميع المصادر حالياً."
+            msg = "❌ تعذر جلب السعر حالياً."
         bot.reply_to(message, msg)
 
     elif text == "💰 المحفظة":
@@ -105,12 +102,18 @@ def handle_all_messages(message):
 
     elif text == "🚀 تنفيذ صفقة محاكاة":
         if price:
-            msg = f"🚀 تم تحليل السوق عند `{price:.2f} $`\n💡 النظام يوصي بعدم فتح صفقة جديدة الآن حفاظاً على رأس المال."
+            msg = (
+                f"🚀 *محاكاة صفقة تداول*\n\n"
+                f"🪙 *الزوج:* BTC/USDT\n"
+                f"💵 *سعر الدخول الحالي:* `{price:.2f} $`\n"
+                f"💰 *الرصيد المتاح:* `{portfolio['usd']:.2f} $`\n\n"
+                f"💡 *التحليل:* المؤشرات مستقرة، يوصى بالانتظار للحصول على نقطة دخول أفضل."
+            )
         else:
-            msg = "❌ تعذر الاتصال ببيانات السوق."
+            msg = "❌ تعذر الاتصال ببيانات السوق حالياً."
         bot.reply_to(message, msg)
 
-# 8. التشغيل الرئيسي
+# 8. التشغيل
 if __name__ == '__main__':
     def run_flask():
         port = int(os.environ.get('PORT', 10000))
@@ -126,5 +129,5 @@ if __name__ == '__main__':
     while True:
         try:
             bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
+        except Exception:
             time.sleep(5)
