@@ -30,20 +30,22 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=port)
 
     threading.Thread(target=run_flask, daemon=True).start()
-    print(f"✅ Flask يعمل على المنفذ {os.environ.get('PORT', 10000)}")
+    print(f"✅ فلاسك (Flask) يعمل على المنفذ {os.environ.get('PORT', 10000)}")
 
     # إزالة أي Webhook عالق (يمنع خطأ 409)
     try:
         bot.remove_webhook()
         print("✅ تم إزالة الـ Webhook القديم")
     except Exception as e:
-        print(f"⚠️ تنبيه: {e}")
+        print(f"⚠️ تنبيه أثناء إزالة الـ Webhook: {e}")
 
     # تشغيل Polling مع إعادة محاولة دائمة
     print("⏳ بدء تشغيل البوت...")
     while True:
         try:
+            # interval=0 يعني استجابة فورية، timeout=20 يعطي مهلة كافية
             bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception as e:
-            print(f"❌ خطأ: {e}، إعادة المحاولة بعد 5 ثوانٍ")
+            print(f"❌ حدث خطأ في البوت (Polling): {e}")
+            print("🔄 إعادة المحاولة بعد 5 ثوانٍ...")
             time.sleep(5)
