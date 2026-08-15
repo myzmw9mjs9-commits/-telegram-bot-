@@ -1,56 +1,47 @@
-import logging
 import os
-from threading import Thread
+import logging
 import requests
+from threading import Thread
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+import telebot
+from telebot import types
 
 # ============================================================
 # إعداد السجلات
 # ============================================================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# الإعدادات (توكن آمن)
+# التوكن من متغيرات البيئة أو المباشر
 # ============================================================
-# اقرأ التوكن من البيئة، وإذا لم يوجد استخدم الاحتياطي (لتشغيله محلياً)
-TOKEN = os.environ.get("BOT_TOKEN", "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4")
+TOKEN = os.getenv("BOT_TOKEN", "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4").strip()
+
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
 # ============================================================
-# خادم ويب صغير لإرضاء Render
+# خادم ويب صغير لـ Render
 # ============================================================
 app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
-    return "Bot is alive!"
+    return "Trading bot is running smoothly!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
-    # إضافة use_reloader=False و debug=False لتجنب مشاكل التشغيل
-    app_web.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    app_web.run(host="0.0.0.0", port=port)
 
 # ============================================================
-# محفظة تجريبية
+# بيانات المحفظة
 # ============================================================
 portfolio = {
     "usd": 1000.0,
-    "btc": 0.0,
+    "btc": 0.0
 }
 
 # ============================================================
-# جلب بيانات السوق من Binance
+# جلب بيانات Binance
 # ============================================================
 def get_btc_price():
     try:
@@ -58,70 +49,68 @@ def get_btc_price():
         res = requests.get(url, timeout=10).json()
         return float(res["price"])
     except Exception as e:
-        logger.error(f"Error fetching price: {e}")
+        logger.error(f"Error getting price: {e}")
         return None
 
 # ============================================================
-# أوامر التليجرام
+# معالجة أوامر التليجرام
 # ============================================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        ["📊 التحليل والتوقع"],
-        ["💰 المحفظة", "🚀 تنفيذ صفقة محاكاة"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn_analysis = types.KeyboardButton("📊 التحليل والتوقع")
+    btn_portfolio = types.KeyboardButton("💰 المحفظة")
+    btn_trade = types.KeyboardButton("🚀 تنفيذ صفقة محاكاة")
+    markup.add(btn_analysis)
+    markup.add(btn_portfolio, btn_trade)
+
+    bot.reply_to(
+        message,
         "أهلاً بك في بوت التداول بالذكاء الاصطناعي! 🤖\nاختر خياراً من القائمة أدناه:",
-        reply_markup=reply_markup
+        reply_markup=markup
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    text = message.text.strip()
     price = get_btc_price()
 
     if text == "📊 التحليل والتوقع":
         if price:
-            # استخدام HTML بدلاً من Markdown
             msg = (
-                f"🪙 <b>BTC/USDT</b>\n"
-                f"💵 السعر الحالي: {price:.2f} $\n"
-                f"📊 المؤشر العام: محايد / صعود خفيف\n"
-                f"🤖 التوصية التجريبية: انتظار فرصة أفضل"
+                f"🪙 *BTC / USDT*\n\n"
+                f"💵 *السعر الحالي:* `{price:.2f} $` \n"
+                f"📊 *المؤشر العام:* صعود خفيف / محايد\n"
+                f"🤖 *التوصية:* انتظار فرصة اختراق المقاومة"
             )
-            await update.message.reply_text(msg, parse_mode='HTML')
         else:
-            await update.message.reply_text("❌ تعذر جلب السعر حالياً من Binance.")
+            msg = "❌ تعذر جلب السعر من Binance حالياً."
+        bot.reply_to(message, msg)
 
     elif text == "💰 المحفظة":
-        # حساب المجموع بأمان (إذا كان السعر None يعتبر 0)
         total = portfolio["usd"] + (portfolio["btc"] * (price if price else 0))
         msg = (
-            f"💵 رصيد الدولار: {portfolio['usd']:.2f} $\n"
-            f"🪙 رصيد البيتكوين: {portfolio['btc']:.6f} BTC\n"
-            f"💎 إجمالي المحفظة: {total:.2f} $"
+            f"💵 *رصيد الدولار:* `{portfolio['usd']:.2f} $` \n"
+            f"🪙 *رصيد البيتكوين:* `{portfolio['btc']:.6f} BTC` \n"
+            f"💎 *إجمالي المحفظة:* `{total:.2f} $`"
         )
-        await update.message.reply_text(msg)
+        bot.reply_to(message, msg)
 
     elif text == "🚀 تنفيذ صفقة محاكاة":
         if price:
-            msg = f"🚀 تم فحص السوق عند السعر {price:.2f} $\n💡 النظام ينصح بالانتظار وعدم المخاطرة الآن."
+            msg = f"🚀 تم تحليل السوق عند `{price:.2f} $`\n💡 النظام يوصي بعدم فتح صفقة جديدة الآن حفاظاً على رأس المال."
         else:
-            msg = "❌ خطأ في الاتصال ببيانات السوق."
-        await update.message.reply_text(msg)
+            msg = "❌ تعذر الاتصال ببيانات السوق."
+        bot.reply_to(message, msg)
 
 # ============================================================
-# التشغيل الرئيسي
+# بدء التشغيل
 # ============================================================
 if __name__ == "__main__":
-    # تشغيل خادم الويب
     t = Thread(target=run_web)
     t.daemon = True
     t.start()
 
-    # تشغيل بوت التليجرام
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Starting Telegram Bot...")
-    app.run_polling()
+    logger.info("Starting TeleBot...")
+    bot.infinity_polling(skip_pending=True)
+
