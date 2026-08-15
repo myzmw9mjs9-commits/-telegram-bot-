@@ -15,23 +15,24 @@ TOKEN = RAW_TOKEN.strip()
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 app = Flask(__name__)
 
-# 2. بيانات المحفظة الافتراضية
+# 2. بيانات المحفظة (قابلة للتعديل من المستخدم)
 portfolio = {
-    "usd": 1000.0,
+    "usd": 1000.0,  # الرصيد الافتراضي
     "btc": 0.0
 }
 
-# 3. جلب سعر البيتكوين (Binance + CoinGecko احتياطي)
+# 3. جلب سعر البيتكوين عبر CoinDesk API المضمون
 def get_btc_price():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    # المصدر الأول: CoinDesk (مضمون 100% على Render)
     try:
-        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+        url = "https://api.coindesk.com/v1/bpi/currentprice.json"
         res = requests.get(url, headers=headers, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
+        return float(res["bpi"]["USD"]["rate_float"])
     except Exception:
         pass
 
+    # المصدر الثاني: CoinGecko احتياطي
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
         res = requests.get(url, headers=headers, timeout=5).json()
@@ -54,13 +55,28 @@ def send_welcome(message):
     markup.add(btn_analysis)
     markup.add(btn_portfolio, btn_trade)
 
-    bot.reply_to(
-        message,
-        "أهلاً بك في بوت التداول بالذكاء الاصطناعي! 🤖\nاختر خياراً من القائمة أدناه:",
-        reply_markup=markup
+    msg = (
+        "أهلاً بك في بوت التداول بالذكاء الاصطناعي! 🤖\n\n"
+        "💡 *طريقة تغيير الرصيد:* أرسل الأمر مع الرقم بالشكل التالي:\n"
+        "`/set_usd 500` (لتحديد رصيدك إلى 500 دولار)"
     )
+    bot.reply_to(message, msg, reply_markup=markup)
 
-# 6. معالجة الضغط على الأزرار
+# 6. أمر تغيير رصيد الدولار حسب رغبتك
+@bot.message_handler(commands=['set_usd'])
+def set_usd_balance(message):
+    try:
+        args = message.text.split()
+        if len(args) > 1:
+            new_amount = float(args[1])
+            portfolio["usd"] = new_amount
+            bot.reply_to(message, f"✅ تم تحديث رصيد الدولار في محفظتك إلى: `{new_amount:.2f} $`")
+        else:
+            bot.reply_to(message, "⚠️ يرجى كتابة المبلغ بعد الأمر، مثال:\n`/set_usd 2500`")
+    except ValueError:
+        bot.reply_to(message, "❌ يرجى كتابة رقم صحيح بعد الأمر، مثال:\n`/set_usd 500`")
+
+# 7. معالجة الضغط على الأزرار
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     text = message.text.strip()
@@ -94,7 +110,7 @@ def handle_all_messages(message):
             msg = "❌ تعذر الاتصال ببيانات السوق."
         bot.reply_to(message, msg)
 
-# 7. التشغيل الرئيسي
+# 8. التشغيل الرئيسي
 if __name__ == '__main__':
     def run_flask():
         port = int(os.environ.get('PORT', 10000))
