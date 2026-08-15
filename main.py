@@ -23,8 +23,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# توكن 
+# توكن البوت الحقيقي
 TOKEN = "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4"
+
 # محاكاة محفظة المستخدم
 portfolio = {
     "usd": 1000.0,
@@ -87,7 +88,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ جاري تحليل المؤشرات المتقدمة وسعر السوق...")
         if price:
             if rsi < 30:
-                msg = f"تنبيه: ** النظام يفضل الانتظار لعدم توفر فرصة **\n(RSI: {rsi}) $ القوية. السعر: {price:.2f}"
+                msg = f"تنبيه: ** النظام يفضل الانتظار لعدم توفر فرصة **\n(RSI: {rsi}) القوية. السعر: {price:.2f} $"
             else:
                 msg = f"تم إيجاد فرصة دخول مناسبة عند السعر {price:.2f} $"
         else:
@@ -95,7 +96,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
 
 if __name__ == '__main__':
-    # تشغيل خادم الويب في الخلفية
+    # تشغيل خادم الويب
     Thread(target=run_web).start()
     
     # تشغيل البوت
@@ -104,7 +105,4 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     app.run_polling()
-
-
-
 
