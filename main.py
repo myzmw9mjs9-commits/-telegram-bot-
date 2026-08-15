@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 TOKEN = "8811018278:AAF36qLjzSNDz8qxcrk8SPkKerzycIpipv4"
 
-
 STARTING_BALANCE = float(os.getenv("STARTING_BALANCE", "1000"))
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))  # 1%
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "0.03"))  # 3%
