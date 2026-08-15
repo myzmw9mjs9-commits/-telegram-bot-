@@ -21,7 +21,7 @@ def start(message):
     bot.reply_to(message, "مرحباً! البوت شغال الآن 🚀")
 
 if __name__ == '__main__':
-    # تشغيل Flask في الخلفية
+    # تشغيل Flask في الخلفية (يحتاجه Render)
     def run_flask():
         port = int(os.environ.get('PORT', 10000))
         app.run(host='0.0.0.0', port=port)
@@ -29,14 +29,14 @@ if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
     print(f"✅ Flask يعمل على المنفذ {os.environ.get('PORT', 10000)}")
 
-    # إزالة أي Webhook عالق (يمنع خطأ 409)
+    # إزالة أي Webhook عالق لتفادي خطأ 409
     try:
         bot.remove_webhook()
         print("✅ تم إزالة الـ Webhook القديم")
     except Exception as e:
         print(f"⚠️ تنبيه: {e}")
 
-    # تشغيل Polling مع إعادة محاولة تلقائية
+    # تشغيل البوت مع إعادة محاولة تلقائية
     print("⏳ بدء تشغيل البوت...")
     while True:
         try:
