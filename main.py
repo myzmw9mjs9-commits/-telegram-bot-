@@ -6,13 +6,12 @@ TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
 bot = telebot.TeleBot(TOKEN)
 
 user_wallet = {}
-open_trades = {}  # لمتابعة الصفقات المفتوحة
+open_trades = {}
 
-# دالة جلب السعر الحي للبيتكوين من Binance
 def get_live_btc_price():
     try:
         url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        response = requests.get(url).json()
+        response = requests.get(url, timeout=5).json()
         return float(response['price'])
     except:
         return 65000.0
@@ -44,7 +43,7 @@ def buy_trade(message):
         btc_bought = amount / current_price
         w['usdt'] -= amount
         w['btc'] += btc_bought
-        open_trades[uid] = current_price # حفظ سعر الدخول
+        open_trades[uid] = current_price
 
         msg = (
             f"🚀 **تم فتح صفقة شراء بالسعر الحي!**\n\n"
