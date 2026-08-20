@@ -1,11 +1,14 @@
 import telebot
 from telebot import types
 
-# ضع التوكن الخاص بك هنا
-TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
-bot = telebot.TeleBot(TOKEN)
+# ضع توكن البوت الخاص بك من BotFather بين الكوتيشن
+TOKEN = 'ضع_التوكن_الخاص_بك_هنا'
 
-# قاعدة بيانات وهمية للمحفظة
+try:
+    bot = telebot.TeleBot(TOKEN)
+except Exception as e:
+    print(f"Error initializing bot: {e}")
+
 user_wallet = {}
 
 def get_user_wallet(user_id):
@@ -13,9 +16,7 @@ def get_user_wallet(user_id):
         user_wallet[user_id] = {'usdt': 1000.0, 'btc': 0.0}
     return user_wallet[user_id]
 
-# دالة اتخاذ القرار المرنة (تسمح بالدخول في كافة الحالات تقريباً)
 def smart_trade_decision(market_status):
-    # المرونة: يسمح بالشراء إذا كان المؤشر صاعد، محايد، أو حتى خفيف
     allowed_statuses = ["صعود خفيف / محايد", "صعود خفيف", "محايد", "مستقرة", "صعود"]
     if any(status in market_status for status in allowed_statuses):
         return True, "تم الكشف عن فرصة مرنة (صعود خفيف/محايد)، تم تنفيذ الصفقة بنجاح!"
@@ -36,10 +37,9 @@ def simulate_trade(message):
     user_id = message.from_user.id
     wallet = get_user_wallet(user_id)
     
-    # محاكاة حالة السوق الحالية
     market_status = "صعود خفيف / محايد"
     current_price = 65000.0
-    trade_amount = 100.0  # مبلغ دخول الصفقة (100 دولار)
+    trade_amount = 100.0
 
     can_trade, reason = smart_trade_decision(market_status)
 
@@ -88,4 +88,5 @@ def show_analysis(message):
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
-bot.polling(none_stop=True)
+if __name__ == "__main__":
+    bot.infinity_polling()
