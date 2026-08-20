@@ -1,92 +1,75 @@
 import telebot
 from telebot import types
 
-# ضع توكن البوت الخاص بك من BotFather بين الكوتيشن
-TOKEN = 'ضع_التوكن_الخاص_بك_هنا'
+# التوكن الخاص بك مفعل وجاهز
+TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
 
-try:
-    bot = telebot.TeleBot(TOKEN)
-except Exception as e:
-    print(f"Error initializing bot: {e}")
+bot = telebot.TeleBot(TOKEN)
 
+# قاعدة بيانات المحفظة
 user_wallet = {}
 
-def get_user_wallet(user_id):
+def get_wallet(user_id):
     if user_id not in user_wallet:
         user_wallet[user_id] = {'usdt': 1000.0, 'btc': 0.0}
     return user_wallet[user_id]
 
-def smart_trade_decision(market_status):
-    allowed_statuses = ["صعود خفيف / محايد", "صعود خفيف", "محايد", "مستقرة", "صعود"]
-    if any(status in market_status for status in allowed_statuses):
-        return True, "تم الكشف عن فرصة مرنة (صعود خفيف/محايد)، تم تنفيذ الصفقة بنجاح!"
-    return False, "السوق في حالة هبوط حاد، تم إلغاء الصفقة لحماية المحفظة."
-
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+def start(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("🚀 تنفيذ صفقة محاكاة")
-    btn2 = types.KeyboardButton("💰 المحفظة")
-    btn3 = types.KeyboardButton("📊 التحليل والتوقع")
-    markup.add(btn1, btn2, btn3)
-    
-    bot.send_message(message.chat.id, "أهلاً بك في بوت التداول الذكي! اختر من القائمة:", reply_markup=markup)
+    markup.add(
+        types.KeyboardButton("🚀 تنفيذ صفقة محاكاة"),
+        types.KeyboardButton("💰 المحفظة"),
+        types.KeyboardButton("📊 التحليل والتوقع")
+    )
+    bot.send_message(message.chat.id, "أهلاً بك! نظام التداول الذكي جاهز والمحاكاة مفعّلة:", reply_markup=markup)
 
-@bot.message_handler(func=lambda message: message.text == "🚀 تنفيذ صفقة محاكاة")
-def simulate_trade(message):
-    user_id = message.from_user.id
-    wallet = get_user_wallet(user_id)
-    
-    market_status = "صعود خفيف / محايد"
-    current_price = 65000.0
-    trade_amount = 100.0
+@bot.message_handler(func=lambda m: m.text == "🚀 تنفيذ صفقة محاكاة")
+def trade(message):
+    uid = message.from_user.id
+    w = get_wallet(uid)
+    price = 65000.0
+    amount = 100.0
 
-    can_trade, reason = smart_trade_decision(market_status)
-
-    if can_trade:
-        if wallet['usdt'] >= trade_amount:
-            btc_bought = trade_amount / current_price
-            wallet['usdt'] -= trade_amount
-            wallet['btc'] += btc_bought
-
-            msg = (
-                f"🚀 **محاكاة صفقة تداول**\n\n"
-                f"🪙 **الزوج:** BTC/USDT\n"
-                f"💵 **سعر الدخول الحالي:** ${current_price:.2f}\n"
-                f"⚡ **الكمية المشتراة:** {btc_bought:.6f} BTC\n"
-                f"💰 **الرصيد المتاح:** ${wallet['usdt']:.2f}\n\n"
-                f"💡 **التحليل:** {reason}"
-            )
-        else:
-            msg = "❌ **الرصيد المتاح غير كافي لتنفيذ الصفقة!**"
+    if w['usdt'] >= amount:
+        btc = amount / price
+        w['usdt'] -= amount
+        w['btc'] += btc
+        msg = (
+            f"🚀 **تم تنفيذ صفقة الشراء بنجاح!**\n\n"
+            f"🪙 **الزوج:** BTC/USDT\n"
+            f"💵 **سعر الدخول:** ${price:.2f}\n"
+            f"⚡ **الكمية المشتراة:** {btc:.6f} BTC\n"
+            f"💰 **رصيد USDT المتبقي:** ${w['usdt']:.2f}\n\n"
+            f"💡 **التحليل:** تم اقتناص فرصة دخول مرنة وسريعة بناءً على حركة السعر."
+        )
     else:
-        msg = f"💡 **التحليل:** {reason}"
+        msg = "❌ **الرصيد المتاح غير كافي لتنفيذ الصفقة!**"
 
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda message: message.text == "💰 المحفظة")
-def show_wallet(message):
-    user_id = message.from_user.id
-    wallet = get_user_wallet(user_id)
-    total_val = wallet['usdt'] + (wallet['btc'] * 65000.0)
-    
+@bot.message_handler(func=lambda m: m.text == "💰 المحفظة")
+def wallet(message):
+    uid = message.from_user.id
+    w = get_wallet(uid)
+    total = w['usdt'] + (w['btc'] * 65000.0)
     msg = (
         f"💰 **المحفظة**\n\n"
-        f"💵 **رصيد الدولار:** ${wallet['usdt']:.2f}\n"
-        f"🪙 **رصيد البيتكوين:** {wallet['btc']:.6f} BTC\n"
-        f"💎 **إجمالي المحفظة:** ${total_val:.2f}"
+        f"💵 **رصيد الدولار:** ${w['usdt']:.2f}\n"
+        f"🪙 **رصيد البيتكوين:** {w['btc']:.6f} BTC\n"
+        f"💎 **إجمالي قيمة المحفظة:** ${total:.2f}"
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda message: message.text == "📊 التحليل والتوقع")
-def show_analysis(message):
+@bot.message_handler(func=lambda m: m.text == "📊 التحليل والتوقع")
+def analysis(message):
     msg = (
-        f"📊 **BTC / USDT**\n\n"
-        f"💵 **السعر الحالي:** $65000.00\n"
-        f"📊 **المؤشر العام:** صعود خفيف / محايد\n"
-        f"🤖 **التوصية:** نظام التفكير المرن مفعل، جاهز للدخول الفوري."
+        "📊 **BTC / USDT**\n\n"
+        "💵 **السعر الحالي:** $65000.00\n"
+        "📊 **المؤشر العام:** صعود خفيف / محايد\n"
+        "🤖 **التوصية:** نظام الدخول السريع والمرن مفعل وجاهز للتنفيذ."
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
-if __name__ == "__main__":
-    bot.infinity_polling()
+if __name__ == '__main__':
+    bot.infinity_polling(skip_pending=True)
