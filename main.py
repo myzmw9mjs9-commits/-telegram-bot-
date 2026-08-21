@@ -49,7 +49,7 @@ def init_db():
 
 init_db()
 
-# --- 2. إدارة قواعد البيانات والمحفظة ---
+# --- 2. إدارة قاعدة البيانات والمحفظة ---
 def get_wallet(user_id):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -67,7 +67,7 @@ def get_wallet(user_id):
 def update_wallet(user_id, usdt, btc):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE wallets SET usdt=?, btc=? WHERE user_id=?", (usdt, btc, user_id))
+    cursor.execute("UPDATE wallets SET usdt=?, btc=? WHERE user_id=?", (user_id, usdt, btc))
     conn.commit()
     conn.close()
 
@@ -147,7 +147,7 @@ def get_all_auto_users():
     conn.close()
     return [r[0] for r in rows]
 
-# --- 3. حساب المؤشرات الفنية (RSI, EMA, MACD) ---
+# --- 3. حساب جميع المؤشرات الفنية المتقدمة ---
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50.0
@@ -178,11 +178,21 @@ def calculate_macd(closes):
     ema12 = calculate_ema(closes, 12)
     ema26 = calculate_ema(closes, 26)
     macd_line = ema12 - ema26
-    # حساب تقريبي لخط الإشارة
     signal_line = macd_line * 0.8  
     return macd_line, signal_line
 
-# --- 4. التحليل الشامل والكامل لجميع المؤشرات والاستراتيجيات ---
+def calculate_bollinger_bands(closes, period=20, std_dev=2):
+    if len(closes) < period:
+        return closes[-1], closes[-1]
+    slice_c = closes[-period:]
+    sma = sum(slice_c) / period
+    variance = sum((x - sma) ** 2 for x in slice_c) / period
+    std = variance ** 0.5
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    return lower, upper
+
+# --- 4. التحليل الكلي الشامل لجميع الاستراتيجيات ---
 def analyze_all_strategies():
     try:
         url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=60"
@@ -192,37 +202,47 @@ def analyze_all_strategies():
         highs = [float(k[2]) for k in res]
         lows = [float(k[3]) for k in res]
         closes = [float(k[4]) for k in res]
+        vols = [float(k[5]) for k in res]
         current_price = closes[-1]
 
-        # 1. المؤشرات الفنية (RSI, EMA, MACD)
+        # حساب المؤشرات
         rsi = calculate_rsi(closes)
         ema20 = calculate_ema(closes, 20)
         ema50 = calculate_ema(closes, 50)
         macd, macd_signal = calculate_macd(closes)
+        bb_lower, bb_upper = calculate_bollinger_bands(closes)
 
-        # شرط الشراء بالمؤشرات الكلاسيكية: RSI متدني + الاتجاه صاعد (EMA20 > EMA50) + MACD إيجابي
-        indicator_signal = (rsi <= 40) and (ema20 >= ema50) and (macd > macd_signal)
+        # 1. استراتيجية المؤشرات المدمجة (RSI + EMA + MACD)
+        if (rsi <= 40) and (ema20 >= ema50) and (macd > macd_signal):
+            return True, "المؤشرات الكلاسيكية (RSI + EMA + MACD)", current_price, current_price * 0.992
 
-        # 2. استراتيجية MSS + FVG
+        # 2. استراتيجية MSS + FVG (اختراق الهيكل والفجوة)
         previous_high = max(highs[-12:-2])
-        has_mss = current_price > previous_high
-        has_fvg = lows[-1] > highs[-3]
-        mss_fvg_signal = has_mss and has_fvg
-
-        # 3. استراتيجية Order Block (OB)
-        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012
-        is_prev_red = closes[-3] < opens[-3]
-        ob_signal = is_explosion and is_prev_red
-        ob_bottom = lows[-3]
-
-        # تحديد أي استراتيجية أعطت الإشارة
-        if indicator_signal:
-            return True, "المؤشرات الفنية (RSI + EMA + MACD)", current_price, current_price * 0.992
-        elif mss_fvg_signal:
+        if (current_price > previous_high) and (lows[-1] > highs[-3]):
             return True, "اختراق الهيكل والفجوة (MSS + FVG)", current_price, current_price * 0.990
-        elif ob_signal:
-            sl_p = ob_bottom if ob_bottom > 0 else current_price * 0.991
+
+        # 3. استراتيجية Order Block (مناطق الطلب)
+        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012
+        if is_explosion and (closes[-3] < opens[-3]):
+            sl_p = lows[-3] if lows[-3] > 0 else current_price * 0.991
             return True, "مناطق الطلب (Order Block)", current_price, sl_p
+
+        # 4. استراتيجية اختراق الفوليوم العالي (Volume Breakout)
+        avg_vol = sum(vols[-10:-1]) / 9
+        if (vols[-1] > avg_vol * 2.0) and (closes[-1] > max(highs[-6:-1])):
+            return True, "انفجار الفوليوم والكسر (Volume Breakout)", current_price, current_price * 0.991
+
+        # 5. استراتيجية بولينجر باندز + RSI (Bollinger Squeeze Bounce)
+        if (current_price <= bb_lower * 1.002) and (rsi < 35):
+            return True, "ارتداد بولينجر باندز (Bollinger Bands + RSI)", current_price, current_price * 0.990
+
+        # 6. استراتيجية التقاطع الذهبي (EMA Golden Cross)
+        if (ema20 > ema50) and (calculate_ema(closes[:-1], 20) <= calculate_ema(closes[:-1], 50)):
+            return True, "التقاطع الذهبي للمتوسطات (Golden Cross)", current_price, current_price * 0.988
+
+        # 7. استراتيجية الدايفرجنس الايجابي (RSI Bullish Divergence)
+        if (closes[-1] < min(closes[-10:-1])) and (rsi > min([calculate_rsi(closes[:i]) for i in range(len(closes)-10, len(closes)-1)])):
+            return True, "دايفرجنس إيجابي (RSI Bullish Divergence)", current_price, current_price * 0.991
 
         return False, None, current_price, 0.0
     except Exception as e:
@@ -236,7 +256,7 @@ def get_live_btc_price():
     except:
         return 65000.0
 
-# --- 5. الماسح الآلي بالسوق الشامل لكل شيء ---
+# --- 5. الماسح الآلي الشامل بالسوق ---
 def auto_market_scanner():
     FEE = 0.001
 
@@ -252,7 +272,7 @@ def auto_market_scanner():
                 trade = get_trade(uid)
                 amount = 100.0
 
-                # فتح صفقة عند تحقق أي شرط من المؤشرات أو الاستراتيجيات
+                # فتح صفقة تلقائية
                 if not trade and w['usdt'] >= amount and has_signal:
                     usdt_after_fee = amount * (1 - FEE)
                     btc_bought = usdt_after_fee / current_price
@@ -274,7 +294,7 @@ def auto_market_scanner():
                     )
                     bot.send_message(uid, msg)
 
-                # متابعة الصفقة + Trailing Stop
+                # إدارة الصفقة والقواعد الحالية
                 elif trade:
                     entry = trade['entry_price']
                     step = trade['trailing_step']
@@ -282,13 +302,13 @@ def auto_market_scanner():
                     # Trailing Stop: تأمين الأرباح
                     if current_price >= entry * 1.010 and step < 1:
                         update_trade_sl(uid, entry, 1)
-                        bot.send_message(uid, f"🛡️ **Trailing Stop:** تم رفع وقف الخسارة إلى سعر الدخول (${entry:,.2f}) لتأمين الصفقة.")
+                        bot.send_message(uid, f"🛡️ **Trailing Stop:** تم رفع وقف الخسارة لسعر الدخول (${entry:,.2f}) لتأمين الصفقة.")
                     elif current_price >= entry * 1.018 and step < 2:
                         new_sl = entry * 1.010
                         update_trade_sl(uid, new_sl, 2)
                         bot.send_message(uid, f"💰 **Trailing Stop:** تم رفع وقف الخسارة لتأمين أرباح +1.0% (${new_sl:,.2f}).")
 
-                    # الخروج عند Target أو Stop Loss
+                    # تحقيق الهدف أو الخروج عند الوقف
                     if current_price >= trade['tp']:
                         gross_returned = trade['btc_bought'] * current_price
                         usdt_returned = gross_returned * (1 - FEE)
@@ -333,7 +353,7 @@ def auto_market_scanner():
 
 threading.Thread(target=auto_market_scanner, daemon=True).start()
 
-# --- 6. الأوامر في تلجرام ---
+# --- 6. أزرار وأوامر التلجرام ---
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -344,12 +364,12 @@ def start(message):
         types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت الموحد بجميع الاستراتيجيات والمؤشرات (RSI + EMA + MACD + MSS + FVG + Order Block + Trailing Stop).", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت الشامل بكافة استراتيجيات ومؤشرات التداول العالمية والمتقدمة.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بكامل الاستراتيجيات والمؤشرات المدمجة!**")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بكامل الاستراتيجيات الشاملة!**")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
