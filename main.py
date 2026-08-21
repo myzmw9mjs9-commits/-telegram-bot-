@@ -8,7 +8,7 @@ import sqlite3
 TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
 bot = telebot.TeleBot(TOKEN)
 
-# --- إعداد قاعدة البيانات SQLite ---
+# --- 1. إعداد قاعدة البيانات SQLite ---
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -49,6 +49,7 @@ def init_db():
 
 init_db()
 
+# --- 2. إدارة قواعد البيانات والمحفظة ---
 def get_wallet(user_id):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -146,39 +147,86 @@ def get_all_auto_users():
     conn.close()
     return [r[0] for r in rows]
 
-# --- دالة كشف منطقة الطلب (Order Block - OB) ---
-cached_ob_reading = {'signal': False, 'entry_price': 0.0, 'ob_top': 0.0, 'ob_bottom': 0.0, 'last_update': 0}
+# --- 3. حساب المؤشرات الفنية (RSI, EMA, MACD) ---
+def calculate_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i-1]
+        gains.append(diff if diff > 0 else 0)
+        losses.append(abs(diff) if diff < 0 else 0)
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
-def get_order_block_reading():
-    now = time.time()
-    if now - cached_ob_reading['last_update'] < 15 and cached_ob_reading['entry_price'] > 0:
-        return cached_ob_reading['signal'], cached_ob_reading['entry_price'], cached_ob_reading['ob_top'], cached_ob_reading['ob_bottom']
+def calculate_ema(closes, period):
+    if len(closes) < period:
+        return closes[-1]
+    multiplier = 2 / (period + 1)
+    ema = sum(closes[:period]) / period
+    for price in closes[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+def calculate_macd(closes):
+    if len(closes) < 26:
+        return 0, 0
+    ema12 = calculate_ema(closes, 12)
+    ema26 = calculate_ema(closes, 26)
+    macd_line = ema12 - ema26
+    # حساب تقريبي لخط الإشارة
+    signal_line = macd_line * 0.8  
+    return macd_line, signal_line
+
+# --- 4. التحليل الشامل والكامل لجميع المؤشرات والاستراتيجيات ---
+def analyze_all_strategies():
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=30"
+        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=60"
         res = requests.get(url, timeout=5).json()
         
         opens = [float(k[1]) for k in res]
         highs = [float(k[2]) for k in res]
         lows = [float(k[3]) for k in res]
         closes = [float(k[4]) for k in res]
-
-        # كشف انفجار سعري هائل بعد شمعة حمراء (Order Block)
-        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012  # صعود بأكثر من 1.2%
-        is_prev_red = closes[-3] < opens[-3]                         # الشمعة المسبقة كانت هابطة
-        
-        ob_signal = is_explosion and is_prev_red
-        ob_top = highs[-3]
-        ob_bottom = lows[-3]
         current_price = closes[-1]
 
-        cached_ob_reading['signal'] = ob_signal
-        cached_ob_reading['entry_price'] = current_price
-        cached_ob_reading['ob_top'] = ob_top
-        cached_ob_reading['ob_bottom'] = ob_bottom
-        cached_ob_reading['last_update'] = now
-        return ob_signal, current_price, ob_top, ob_bottom
-    except:
-        return False, 0.0, 0.0, 0.0
+        # 1. المؤشرات الفنية (RSI, EMA, MACD)
+        rsi = calculate_rsi(closes)
+        ema20 = calculate_ema(closes, 20)
+        ema50 = calculate_ema(closes, 50)
+        macd, macd_signal = calculate_macd(closes)
+
+        # شرط الشراء بالمؤشرات الكلاسيكية: RSI متدني + الاتجاه صاعد (EMA20 > EMA50) + MACD إيجابي
+        indicator_signal = (rsi <= 40) and (ema20 >= ema50) and (macd > macd_signal)
+
+        # 2. استراتيجية MSS + FVG
+        previous_high = max(highs[-12:-2])
+        has_mss = current_price > previous_high
+        has_fvg = lows[-1] > highs[-3]
+        mss_fvg_signal = has_mss and has_fvg
+
+        # 3. استراتيجية Order Block (OB)
+        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012
+        is_prev_red = closes[-3] < opens[-3]
+        ob_signal = is_explosion and is_prev_red
+        ob_bottom = lows[-3]
+
+        # تحديد أي استراتيجية أعطت الإشارة
+        if indicator_signal:
+            return True, "المؤشرات الفنية (RSI + EMA + MACD)", current_price, current_price * 0.992
+        elif mss_fvg_signal:
+            return True, "اختراق الهيكل والفجوة (MSS + FVG)", current_price, current_price * 0.990
+        elif ob_signal:
+            sl_p = ob_bottom if ob_bottom > 0 else current_price * 0.991
+            return True, "مناطق الطلب (Order Block)", current_price, sl_p
+
+        return False, None, current_price, 0.0
+    except Exception as e:
+        return False, None, 0.0, 0.0
 
 def get_live_btc_price():
     try:
@@ -188,7 +236,7 @@ def get_live_btc_price():
     except:
         return 65000.0
 
-# --- المكتشف الآلي المطور مع الـ Order Block و Trailing Stop ---
+# --- 5. الماسح الآلي بالسوق الشامل لكل شيء ---
 def auto_market_scanner():
     FEE = 0.001
 
@@ -196,7 +244,7 @@ def auto_market_scanner():
         try:
             time.sleep(10)
             current_price = get_live_btc_price()
-            ob_signal, entry_p, ob_top, ob_bottom = get_order_block_reading()
+            has_signal, strat_name, entry_p, stop_sl = analyze_all_strategies()
             auto_users = get_all_auto_users()
 
             for uid in auto_users:
@@ -204,51 +252,43 @@ def auto_market_scanner():
                 trade = get_trade(uid)
                 amount = 100.0
 
-                # 1. فتح صفقة جديدة عند كشف Order Block
-                if not trade and w['usdt'] >= amount:
-                    if ob_signal:
-                        usdt_after_fee = amount * (1 - FEE)
-                        btc_bought = usdt_after_fee / current_price
-                        
-                        w['usdt'] -= amount
-                        w['btc'] += btc_bought
-                        update_wallet(uid, w['usdt'], w['btc'])
+                # فتح صفقة عند تحقق أي شرط من المؤشرات أو الاستراتيجيات
+                if not trade and w['usdt'] >= amount and has_signal:
+                    usdt_after_fee = amount * (1 - FEE)
+                    btc_bought = usdt_after_fee / current_price
+                    
+                    w['usdt'] -= amount
+                    w['btc'] += btc_bought
+                    update_wallet(uid, w['usdt'], w['btc'])
 
-                        target_tp = current_price * 1.025 # هدف ممتاز +2.5%
-                        stop_sl = ob_bottom if ob_bottom > 0 else current_price * 0.991  # قاع الـ Order Block كوقف خسارة
-                        
-                        save_trade(uid, current_price, btc_bought, target_tp, stop_sl, trailing_step=0)
-                        
-                        msg = (
-                            "🧱 **تم كشف منطقة طلب مؤسسية (Order Block)!**\n\n"
-                            f"📈 **حجم الانفجار السعري:** ممتاز 🚀\n"
-                            f"📍 **منطقة الطلب (OB):** ${ob_bottom:,.2f} - ${ob_top:,.2f}\n"
-                            f"💵 **سعر الدخول:** ${current_price:,.2f}\n"
-                            f"🎯 **هدف الربح (TP +2.5%):** ${target_tp:,.2f}\n"
-                            f"🛡️ **وقف الخسارة الأولي:** ${stop_sl:,.2f}\n"
-                            f"💰 **رصيد المحفظة المتبقي:** ${w['usdt']:.2f}"
-                        )
-                        bot.send_message(uid, msg)
+                    target_tp = current_price * 1.020 # هدف 2%
+                    save_trade(uid, current_price, btc_bought, target_tp, stop_sl, trailing_step=0)
+                    
+                    msg = (
+                        f"🔥 **صفقة جديدة تلقائية!**\n\n"
+                        f"📊 **الاستراتيجية:** {strat_name}\n"
+                        f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
+                        f"🎯 **الهدف (TP +2%):** ${target_tp:,.2f}\n"
+                        f"🛡️ **وقف الخسارة (SL):** ${stop_sl:,.2f}\n"
+                        f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
+                    )
+                    bot.send_message(uid, msg)
 
-                # 2. متابعة الصفقة الحالية + تفعيل ملاحقة الأرباح (Trailing Stop)
+                # متابعة الصفقة + Trailing Stop
                 elif trade:
                     entry = trade['entry_price']
                     step = trade['trailing_step']
 
-                    # --- خوارزمية ملاحقة الأرباح (Trailing Stop) ---
-                    # الخطوة 1: عند تحقيق +1.0% ربح -> نقل الوقف لنقطة الدخول (Break Even)
+                    # Trailing Stop: تأمين الأرباح
                     if current_price >= entry * 1.010 and step < 1:
-                        new_sl = entry
-                        update_trade_sl(uid, new_sl, 1)
-                        bot.send_message(uid, f"🛡️ **تحديث أمان (Trailing Stop):**\nارتفع السعر +1%! تم رفع وقف الخسارة تلقائياً إلى نقطة الدخول (${new_sl:,.2f}) لضمان عدم الخسارة نهائياً.")
-
-                    # الخطوة 2: عند تحقيق +1.8% ربح -> تأمين +1.0% أرباح صافية في الجيب
+                        update_trade_sl(uid, entry, 1)
+                        bot.send_message(uid, f"🛡️ **Trailing Stop:** تم رفع وقف الخسارة إلى سعر الدخول (${entry:,.2f}) لتأمين الصفقة.")
                     elif current_price >= entry * 1.018 and step < 2:
                         new_sl = entry * 1.010
                         update_trade_sl(uid, new_sl, 2)
-                        bot.send_message(uid, f"💰 **تأمين أرباح (Trailing Stop):**\nوصل الربح إلى +1.8%! تم رفع وقف الخسارة لتأمين +1.0% أرباح مؤكدة (${new_sl:,.2f}).")
+                        bot.send_message(uid, f"💰 **Trailing Stop:** تم رفع وقف الخسارة لتأمين أرباح +1.0% (${new_sl:,.2f}).")
 
-                    # --- إغلاق الصفقة عند الهدف أو الوقف المحدث ---
+                    # الخروج عند Target أو Stop Loss
                     if current_price >= trade['tp']:
                         gross_returned = trade['btc_bought'] * current_price
                         usdt_returned = gross_returned * (1 - FEE)
@@ -261,32 +301,30 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🟢 **تم تحقيق الهدف الكامل بنجاح (+2.5%)!**\n\n"
+                            "🟢 **تم تحقيق هدف الربح (+2%)!**\n\n"
                             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
                             f"📈 **صافي الربح:** +${profit:.2f}\n"
-                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
+                            f"💰 **رصيد المحفظة:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
                     elif current_price <= trade['sl']:
                         gross_returned = trade['btc_bought'] * current_price
                         usdt_returned = gross_returned * (1 - FEE)
-                        loss_or_profit = usdt_returned - 100.0
+                        res_pnl = usdt_returned - 100.0
 
                         w['usdt'] += usdt_returned
                         w['btc'] = 0.0
                         update_wallet(uid, w['usdt'], w['btc'])
-                        record_history(uid, trade['entry_price'], current_price, loss_or_profit)
+                        record_history(uid, trade['entry_price'], current_price, res_pnl)
                         delete_trade(uid)
 
-                        icon = "🟢" if loss_or_profit >= 0 else "🔴"
-                        status_title = "تأمين الأرباح" if loss_or_profit >= 0 else "وقف الخسارة"
-                        
+                        icon = "🟢" if res_pnl >= 0 else "🔴"
                         msg = (
-                            f"{icon} **تم الخروج بناءً على {status_title}!**\n\n"
+                            f"{icon} **تم الخروج من الصفقة!**\n\n"
                             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-                            f"📊 **النتيجة:** {icon} ${loss_or_profit:+.2f}\n"
-                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
+                            f"📊 **النتيجة:** {icon} ${res_pnl:+.2f}\n"
+                            f"💰 **رصيد المحفظة:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
@@ -295,7 +333,7 @@ def auto_market_scanner():
 
 threading.Thread(target=auto_market_scanner, daemon=True).start()
 
-# --- أوامر التلجرام والواجهة ---
+# --- 6. الأوامر في تلجرام ---
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -306,12 +344,12 @@ def start(message):
         types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت باستراتيجية مناطق الطلب (Order Block) وملاحقة الأرباح الذكية (Trailing Stop).", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت الموحد بجميع الاستراتيجيات والمؤشرات (RSI + EMA + MACD + MSS + FVG + Order Block + Trailing Stop).", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بمفهوم Order Blocks & Trailing Stop!**")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بكامل الاستراتيجيات والمؤشرات المدمجة!**")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
