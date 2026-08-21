@@ -4,7 +4,6 @@ import requests
 import threading
 import time
 import sqlite3
-import math
 
 TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
 bot = telebot.TeleBot(TOKEN)
@@ -139,51 +138,40 @@ def get_all_auto_users():
     conn.close()
     return [r[0] for r in rows]
 
-# --- التحليل الذكي المتقدم (قراءة الضغط السعري والزخم المبكر) ---
-cached_market_reading = {'signal': False, 'squeeze': 0.0, 'rsi': 50.0, 'last_update': 0}
+# --- تحليل هيكل السوق الذكي (MSS + FVG) ---
+cached_smart_reading = {'signal': False, 'entry_price': 0.0, 'prev_high': 0.0, 'last_update': 0}
 
 def get_smart_market_reading():
     now = time.time()
-    if now - cached_market_reading['last_update'] < 20 and cached_market_reading['rsi'] > 0:
-        return cached_market_reading['signal'], cached_market_reading['squeeze'], cached_market_reading['rsi']
+    if now - cached_smart_reading['last_update'] < 15 and cached_smart_reading['entry_price'] > 0:
+        return cached_smart_reading['signal'], cached_smart_reading['entry_price'], cached_smart_reading['prev_high']
     try:
-        # فريم 15 دقيقة لقراءة الإشارات المبكرة بدقة قبل حدوث الانفجار
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=50"
+        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=30"
         res = requests.get(url, timeout=5).json()
-        closes = [float(k[4]) for k in res]
-        current_price = closes[-1]
-
-        # 1. حساب المتوسط المتحرك (SMA 20) والإنحراف المعياري للبولنجر باند
-        period = 20
-        sma_20 = sum(closes[-period:]) / period
-        variance = sum((x - sma_20) ** 2 for x in closes[-period:]) / period
-        stdev = math.sqrt(variance)
         
-        upper_band = sma_20 + (2 * stdev)
-        lower_band = sma_20 - (2 * stdev)
-        band_width = (upper_band - lower_band) / sma_20 # مؤشر ضيق النطاق (Squeeze)
+        highs = [float(k[2]) for k in res]
+        lows = [float(k[3]) for k in res]
+        closes = [float(k[4]) for k in res]
+        
+        # 1. كشف اختراق الهيكل (MSS)
+        previous_high = max(highs[-12:-2])
+        current_close = closes[-1]
+        has_mss = current_close > previous_high
 
-        # 2. حساب RSI 14 للزخم
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            change = closes[i] - closes[i-1]
-            gains.append(change if change >= 0 else 0)
-            losses.append(abs(change) if change < 0 else 0)
-        avg_gain = sum(gains[-14:]) / 14
-        avg_loss = sum(losses[-14:]) / 14
-        rsi = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
+        # 2. كشف الفجوة السعرية (FVG)
+        candle1_high = highs[-3]
+        candle3_low = lows[-1]
+        has_fvg = candle3_low > candle1_high
 
-        # 3. قراءة التجميع المبكر: (النطاق ضيق + RSI يبدأ بالارتفاع من منطقة المنتصف + الشمعة الأخيرة تبدأ تخترق نحو الأعلى)
-        momentum_building = (closes[-1] > closes[-2]) and (closes[-2] > closes[-3]) # 3 شمعات صاعدة متتالية صغيرة (تجميع مبكر)
-        smart_signal = (band_width < 0.015) and momentum_building and (50 <= rsi <= 65)
+        smart_signal = has_mss and has_fvg
 
-        cached_market_reading['signal'] = smart_signal
-        cached_market_reading['squeeze'] = band_width
-        cached_market_reading['rsi'] = rsi
-        cached_market_reading['last_update'] = now
-        return smart_signal, band_width, rsi
+        cached_smart_reading['signal'] = smart_signal
+        cached_smart_reading['entry_price'] = current_close
+        cached_smart_reading['prev_high'] = previous_high
+        cached_smart_reading['last_update'] = now
+        return smart_signal, current_close, previous_high
     except:
-        return False, cached_market_reading['squeeze'], cached_market_reading['rsi']
+        return False, 0.0, 0.0
 
 def get_live_btc_price():
     try:
@@ -194,20 +182,20 @@ def get_live_btc_price():
         return 65000.0
 
 def auto_market_scanner():
+    FEE = 0.001
+
     while True:
         try:
             time.sleep(10)
             current_price = get_live_btc_price()
-            smart_signal, squeeze, rsi = get_smart_market_reading()
+            smart_signal, entry_p, prev_h = get_smart_market_reading()
             auto_users = get_all_auto_users()
-            FEE = 0.001
 
             for uid in auto_users:
                 w = get_wallet(uid)
                 trade = get_trade(uid)
                 amount = 100.0
 
-                # قراءة الإشارة المبكرة والدخول قبل الانفجار السعري
                 if not trade and w['usdt'] >= amount:
                     if smart_signal:
                         usdt_after_fee = amount * (1 - FEE)
@@ -217,19 +205,19 @@ def auto_market_scanner():
                         w['btc'] += btc_bought
                         update_wallet(uid, w['usdt'], w['btc'])
 
-                        target_tp = current_price * 1.018 # هدف 1.8%
-                        stop_sl = current_price * 0.992  # وقف خسارة 0.8%
+                        target_tp = current_price * 1.020 # هدف 2.0%
+                        stop_sl = current_price * 0.990  # وقف 1.0%
                         
                         save_trade(uid, current_price, btc_bought, target_tp, stop_sl)
                         
                         msg = (
-                            "⚡ **تم رصد إشارة تجميع وانفجار مبكر!**\n\n"
-                            f"🔍 **حالة الضغط السعري:** تجميع إيجابي (Squeeze)\n"
-                            f"📊 **مؤشر الزخم RSI:** {rsi:.1f}\n"
-                            f"💵 **سعر الدخول المبكر:** ${current_price:,.2f}\n"
-                            f"🎯 **هدف الربح (TP):** ${target_tp:,.2f}\n"
-                            f"🛡️ **وقف الخسارة (SL):** ${stop_sl:,.2f}\n"
-                            f"💰 **رصيد المحفظة:** ${w['usdt']:.2f}"
+                            "🔥 **صفقة جديدة بناءً على هيكل السوق (SMC)!**\n\n"
+                            f"📈 **تم كسر الهيكل (MSS):** اخترق القمة ${prev_h:,.2f}\n"
+                            "⚡ **تأكيد الفجوة (FVG):** سيولة شراء مؤسسية عالية\n"
+                            f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
+                            f"🎯 **هدف الربح (TP +2%):** ${target_tp:,.2f}\n"
+                            f"🛡️ **وقف الخسارة (SL -1%):** ${stop_sl:,.2f}\n"
+                            f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
@@ -246,8 +234,8 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🟢 **تم تحقيق الهدف من الانفجار السعري!**\n\n"
-                            f"💵 **سعر الخروج:** ${current_price:,.2f}\n"
+                            "🟢 **تم تحقيق هدف الربح المؤسسي (+2%)!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
                             f"📈 **صافي الربح:** +${profit:.2f}\n"
                             f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
                         )
@@ -265,8 +253,8 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🔴 **تم تفعيل وقف الخسارة الاحترازي!**\n\n"
-                            f"💵 **سعر الخروج:** ${current_price:,.2f}\n"
+                            "🔴 **تم ضرب وقف الخسارة الاحترازي!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
                             f"📉 **النتيجة:** ${loss:.2f}\n"
                             f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
                         )
@@ -287,12 +275,12 @@ def start(message):
         types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم ترقية البوت لقراءة التجميع والزخم المبكر قبل الانفجار.", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت بالاستراتيجية الذكية (MSS + FVG).", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل قراءة الزخم المبكر بنجاح!**")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الذكي القائم على هيكل السوق!**")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
