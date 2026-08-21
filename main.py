@@ -33,7 +33,6 @@ def init_db():
             user_id INTEGER PRIMARY KEY
         )
     ''')
-    # جدول سجل الصفقات الأرباح/الخسائر
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,17 +138,24 @@ def get_all_auto_users():
     conn.close()
     return [r[0] for r in rows]
 
-cached_indicators = {'rsi': 50.0, 'ema': 0.0, 'last_update': 0}
+# --- التحليل الفني المتقدم (EMA200 + MACD + RSI) على فريم 1h ---
+cached_analysis = {'signal': False, 'ema200': 0.0, 'rsi': 50.0, 'last_update': 0}
 
-def get_klines_analysis():
+def get_advanced_analysis():
     now = time.time()
-    if now - cached_indicators['last_update'] < 15 and cached_indicators['ema'] > 0:
-        return cached_indicators['rsi'], cached_indicators['ema']
+    if now - cached_analysis['last_update'] < 60 and cached_analysis['ema200'] > 0:
+        return cached_analysis['signal'], cached_analysis['ema200'], cached_analysis['rsi']
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=30"
+        # التداول على فريم 1h لتقليل الإشارات الكاذبة
+        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=210"
         res = requests.get(url, timeout=5).json()
         closes = [float(k[4]) for k in res]
-        
+        current_price = closes[-1]
+
+        # 1. حساب EMA 200 (تحديد الاتجاه العام)
+        ema200 = sum(closes[-200:]) / 200
+
+        # 2. حساب RSI 14
         gains, losses = [], []
         for i in range(1, len(closes)):
             change = closes[i] - closes[i-1]
@@ -158,14 +164,22 @@ def get_klines_analysis():
         avg_gain = sum(gains[-14:]) / 14
         avg_loss = sum(losses[-14:]) / 14
         rsi = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
-        ema = sum(closes[-5:]) / 5
 
-        cached_indicators['rsi'] = rsi
-        cached_indicators['ema'] = ema
-        cached_indicators['last_update'] = now
-        return rsi, ema
+        # 3. حساب MACD تقريبي (EMA12 - EMA26)
+        ema12 = sum(closes[-12:]) / 12
+        ema26 = sum(closes[-26:]) / 26
+        macd_line = ema12 - ema26
+
+        # شرط الدخول القوي: السعر فوق EMA200 (اتجاه صاعد) + MACD موجب + RSI بين 45 و 65
+        buy_signal = (current_price > ema200) and (macd_line > 0) and (45 <= rsi <= 65)
+
+        cached_analysis['signal'] = buy_signal
+        cached_analysis['ema200'] = ema200
+        cached_analysis['rsi'] = rsi
+        cached_analysis['last_update'] = now
+        return buy_signal, ema200, rsi
     except:
-        return cached_indicators['rsi'], cached_indicators['ema']
+        return False, cached_analysis['ema200'], cached_analysis['rsi']
 
 def get_live_btc_price():
     try:
@@ -176,16 +190,13 @@ def get_live_btc_price():
         return 65000.0
 
 def auto_market_scanner():
-    prev_price = get_live_btc_price()
     FEE = 0.001
 
     while True:
         try:
-            time.sleep(5)
+            time.sleep(10)
             current_price = get_live_btc_price()
-            price_change = ((current_price - prev_price) / prev_price) * 100
-            
-            rsi, ema = get_klines_analysis()
+            buy_signal, ema200, rsi = get_advanced_analysis()
             auto_users = get_all_auto_users()
 
             for uid in auto_users:
@@ -193,8 +204,9 @@ def auto_market_scanner():
                 trade = get_trade(uid)
                 amount = 100.0
 
+                # فتح صفقة عند تحقق الشروط المتقدمة
                 if not trade and w['usdt'] >= amount:
-                    if price_change >= 0.05 and 35 <= rsi <= 60 and current_price >= ema:
+                    if buy_signal:
                         usdt_after_fee = amount * (1 - FEE)
                         btc_bought = usdt_after_fee / current_price
                         
@@ -202,20 +214,20 @@ def auto_market_scanner():
                         w['btc'] += btc_bought
                         update_wallet(uid, w['usdt'], w['btc'])
 
-                        target_tp = current_price * 1.012
-                        stop_sl = current_price * 0.995
+                        # أهداف احترافية: TP +2.0% و SL -1.0% (Risk/Reward 1:2)
+                        target_tp = current_price * 1.020
+                        stop_sl = current_price * 0.990
                         
                         save_trade(uid, current_price, btc_bought, target_tp, stop_sl)
                         
                         msg = (
-                            "🤖 صفقة شراء جديدة!\n\n"
-                            f"📈 صعود على فريم 5 دقائق: {price_change:.2f}%\n"
-                            f"📊 مؤشر RSI: {rsi:.1f}\n"
-                            f"💵 سعر الشراء: ${current_price:,.2f}\n"
-                            "📉 العمولة: $0.10 USDT\n"
-                            f"🎯 هدف الربح: ${target_tp:,.2f}\n"
-                            f"🛡️ وقف الخسارة: ${stop_sl:,.2f}\n"
-                            f"💰 المتبقي بالمحفظة: ${w['usdt']:.2f}"
+                            "🚀 **إشارة تداول موثوقة (فريم 1h)!**\n\n"
+                            f"📊 **الاتجاه العام:** صاعد (فوق EMA 200)\n"
+                            f"📈 **مؤشر RSI:** {rsi:.1f}\n"
+                            f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
+                            f"🎯 **الهدف (TP +2%):** ${target_tp:,.2f}\n"
+                            f"🛡️ **الوقف (SL -1%):** ${stop_sl:,.2f}\n"
+                            f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
@@ -232,10 +244,10 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🟢 تم تحقيق هدف الربح!\n\n"
-                            f"💵 سعر البيع: ${current_price:,.2f}\n"
-                            f"📈 صافي الربح: +${profit:.2f}\n"
-                            f"💰 رصيد المحفظة الحالي: ${w['usdt']:.2f}"
+                            "🟢 **تم تحقيق الهدف بنجاح (+2%)!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
+                            f"📈 **صافي الربح:** +${profit:.2f}\n"
+                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
@@ -251,14 +263,13 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🔴 تم تفعيل وقف الخسارة!\n\n"
-                            f"💵 سعر البيع: ${current_price:,.2f}\n"
-                            f"📉 النتيجة: ${loss:.2f}\n"
-                            f"💰 رصيد المحفظة الحالي: ${w['usdt']:.2f}"
+                            "🔴 **تم ضرب وقف الخسارة (-1%)!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
+                            f"📉 **النتيجة:** ${loss:.2f}\n"
+                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
-            prev_price = current_price
         except Exception as e:
             print(f"Scanner error: {e}")
 
@@ -274,17 +285,17 @@ def start(message):
         types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت بنجاح.", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت بالاستراتيجية المتقدمة (فريم 1h).", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ تم تفعيل التداول الآلي بنجاح!")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بالاستراتيجية المتقدمة!**")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
     set_auto_status(message.from_user.id, False)
-    bot.send_message(message.chat.id, "🛑 تم إيقاف التداول الآلي.")
+    bot.send_message(message.chat.id, "🛑 **تم إيقاف التداول الآلي.**")
 
 @bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
 def history(message):
@@ -295,14 +306,14 @@ def history(message):
         bot.send_message(message.chat.id, "📂 لا يوجد لديك سجل صفقات مكتملة حتى الآن.")
         return
 
-    msg = "📊 سجل آخر الصفقات المكتملة:\n\n"
+    msg = "📊 **سجل آخر الصفقات المكتملة:**\n\n"
     for r in rows:
         entry, exit_p, pnl, dt = r
         icon = "🟢" if pnl >= 0 else "🔴"
         msg += f"🗓️ {dt}\n💵 دخول: ${entry:,.2f} | خروج: ${exit_p:,.2f}\n{icon} النتيجة: ${pnl:+.2f}\n--------------------\n"
     
     total_icon = "🟢" if total_pnl >= 0 else "🔴"
-    msg += f"\n💰 إجمالي الأرباح/الخسائر: {total_icon} ${total_pnl:+.2f}"
+    msg += f"\n💰 **إجمالي الأرباح/الخسائر:** {total_icon} ${total_pnl:+.2f}"
     bot.send_message(message.chat.id, msg)
 
 @bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
@@ -325,13 +336,13 @@ def sell_trade(message):
 
         icon = "🟢" if profit >= 0 else "🔴"
         msg = (
-            "⚡ تم البيع اليدوي الإضطراري!\n\n"
-            f"💵 سعر البيع: ${current_price:,.2f}\n"
-            f"{icon} صافي النتيجة: ${profit:+.2f}\n"
-            f"💰 رصيد المحفظة الجديد: ${w['usdt']:.2f}"
+            "⚡ **تم البيع اليدوي الإضطراري!**\n\n"
+            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
+            f"{icon} **صافي النتيجة:** ${profit:+.2f}\n"
+            f"💰 **رصيد المحفظة الجديد:** ${w['usdt']:.2f}"
         )
     else:
-        msg = "❌ لا توجد صفقات مفتوحة حالياً!"
+        msg = "❌ **لا توجد صفقات مفتوحة حالياً!**"
 
     bot.send_message(message.chat.id, msg)
 
@@ -349,12 +360,12 @@ def wallet(message):
         trade_info = f"صفقة قائمة بسعر ${trade['entry_price']:,.2f}\n🎯 الهدف: ${trade['tp']:,.2f}\n🛡️ الوقف: ${trade['sl']:,.2f}"
 
     msg = (
-        "💰 المحفظة\n\n"
-        f"💵 الدولار: ${w['usdt']:.2f}\n"
-        f"🪙 البيتكوين: {w['btc']:.6f} BTC\n"
-        f"💎 الإجمالي الحي: ${total:.2f}\n\n"
-        f"🤖 حالة التداول الآلي: {status}\n"
-        f"📊 حالة الصفقة:\n{trade_info}"
+        "💰 **المحفظة**\n\n"
+        f"💵 **الدولار:** ${w['usdt']:.2f}\n"
+        f"🪙 **البيتكوين:** {w['btc']:.6f} BTC\n"
+        f"💎 **الإجمالي الحي:** ${total:.2f}\n\n"
+        f"🤖 **حالة التداول الآلي:** {status}\n"
+        f"📊 **حالة الصفقة:**\n{trade_info}"
     )
     bot.send_message(message.chat.id, msg)
 
