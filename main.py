@@ -270,7 +270,7 @@ def auto_market_scanner():
             for uid in auto_users:
                 w = get_wallet(uid)
                 trade = get_trade(uid)
-                amount = 100.0
+                amount = w['usdt'] * 0.05
 
                 # فتح صفقة تلقائية
                 if not trade and w['usdt'] >= amount and has_signal:
@@ -281,15 +281,16 @@ def auto_market_scanner():
                     w['btc'] += btc_bought
                     update_wallet(uid, w['usdt'], w['btc'])
 
-                    target_tp = current_price * 1.020 # هدف 2%
+                    target_tp = current_price * 1.04 # هدف 2%
+                    stop_sl = current_price * 0.98
                     save_trade(uid, current_price, btc_bought, target_tp, stop_sl, trailing_step=0)
-                    
+            
                     msg = (
                         f"🔥 **صفقة جديدة تلقائية!**\n\n"
                         f"📊 **الاستراتيجية:** {strat_name}\n"
                         f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
-                        f"🎯 **الهدف (TP +2%):** ${target_tp:,.2f}\n"
-                        f"🛡️ **وقف الخسارة (SL):** ${stop_sl:,.2f}\n"
+                        f"🎯 **الهدف (TP +4%):** ${target_tp:,.2f}\n"
+                        f"🛡️ **وقف الخسارة (SL -2‎%‎):** ${stop_sl:,.2f}\n"
                         f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
                     )
                     bot.send_message(uid, msg)
