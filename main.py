@@ -25,7 +25,8 @@ def init_db():
             entry_price REAL,
             btc_bought REAL,
             tp REAL,
-            sl REAL
+            sl REAL,
+            trailing_step INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('''
@@ -69,10 +70,17 @@ def update_wallet(user_id, usdt, btc):
     conn.commit()
     conn.close()
 
-def save_trade(user_id, entry_price, btc_bought, tp, sl):
+def save_trade(user_id, entry_price, btc_bought, tp, sl, trailing_step=0):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("REPLACE INTO trades VALUES (?, ?, ?, ?, ?)", (user_id, entry_price, btc_bought, tp, sl))
+    cursor.execute("REPLACE INTO trades VALUES (?, ?, ?, ?, ?, ?)", (user_id, entry_price, btc_bought, tp, sl, trailing_step))
+    conn.commit()
+    conn.close()
+
+def update_trade_sl(user_id, new_sl, new_step):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE trades SET sl=?, trailing_step=? WHERE user_id=?", (new_sl, new_step, user_id))
     conn.commit()
     conn.close()
 
@@ -86,11 +94,11 @@ def delete_trade(user_id):
 def get_trade(user_id):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT entry_price, btc_bought, tp, sl FROM trades WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT entry_price, btc_bought, tp, sl, trailing_step FROM trades WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        return {'entry_price': row[0], 'btc_bought': row[1], 'tp': row[2], 'sl': row[3]}
+        return {'entry_price': row[0], 'btc_bought': row[1], 'tp': row[2], 'sl': row[3], 'trailing_step': row[4]}
     return None
 
 def record_history(user_id, entry_price, exit_price, pnl):
@@ -138,40 +146,39 @@ def get_all_auto_users():
     conn.close()
     return [r[0] for r in rows]
 
-# --- تحليل هيكل السوق الذكي (MSS + FVG) ---
-cached_smart_reading = {'signal': False, 'entry_price': 0.0, 'prev_high': 0.0, 'last_update': 0}
+# --- دالة كشف منطقة الطلب (Order Block - OB) ---
+cached_ob_reading = {'signal': False, 'entry_price': 0.0, 'ob_top': 0.0, 'ob_bottom': 0.0, 'last_update': 0}
 
-def get_smart_market_reading():
+def get_order_block_reading():
     now = time.time()
-    if now - cached_smart_reading['last_update'] < 15 and cached_smart_reading['entry_price'] > 0:
-        return cached_smart_reading['signal'], cached_smart_reading['entry_price'], cached_smart_reading['prev_high']
+    if now - cached_ob_reading['last_update'] < 15 and cached_ob_reading['entry_price'] > 0:
+        return cached_ob_reading['signal'], cached_ob_reading['entry_price'], cached_ob_reading['ob_top'], cached_ob_reading['ob_bottom']
     try:
         url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=30"
         res = requests.get(url, timeout=5).json()
         
+        opens = [float(k[1]) for k in res]
         highs = [float(k[2]) for k in res]
         lows = [float(k[3]) for k in res]
         closes = [float(k[4]) for k in res]
+
+        # كشف انفجار سعري هائل بعد شمعة حمراء (Order Block)
+        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012  # صعود بأكثر من 1.2%
+        is_prev_red = closes[-3] < opens[-3]                         # الشمعة المسبقة كانت هابطة
         
-        # 1. كشف اختراق الهيكل (MSS)
-        previous_high = max(highs[-12:-2])
-        current_close = closes[-1]
-        has_mss = current_close > previous_high
+        ob_signal = is_explosion and is_prev_red
+        ob_top = highs[-3]
+        ob_bottom = lows[-3]
+        current_price = closes[-1]
 
-        # 2. كشف الفجوة السعرية (FVG)
-        candle1_high = highs[-3]
-        candle3_low = lows[-1]
-        has_fvg = candle3_low > candle1_high
-
-        smart_signal = has_mss and has_fvg
-
-        cached_smart_reading['signal'] = smart_signal
-        cached_smart_reading['entry_price'] = current_close
-        cached_smart_reading['prev_high'] = previous_high
-        cached_smart_reading['last_update'] = now
-        return smart_signal, current_close, previous_high
+        cached_ob_reading['signal'] = ob_signal
+        cached_ob_reading['entry_price'] = current_price
+        cached_ob_reading['ob_top'] = ob_top
+        cached_ob_reading['ob_bottom'] = ob_bottom
+        cached_ob_reading['last_update'] = now
+        return ob_signal, current_price, ob_top, ob_bottom
     except:
-        return False, 0.0, 0.0
+        return False, 0.0, 0.0, 0.0
 
 def get_live_btc_price():
     try:
@@ -181,6 +188,7 @@ def get_live_btc_price():
     except:
         return 65000.0
 
+# --- المكتشف الآلي المطور مع الـ Order Block و Trailing Stop ---
 def auto_market_scanner():
     FEE = 0.001
 
@@ -188,7 +196,7 @@ def auto_market_scanner():
         try:
             time.sleep(10)
             current_price = get_live_btc_price()
-            smart_signal, entry_p, prev_h = get_smart_market_reading()
+            ob_signal, entry_p, ob_top, ob_bottom = get_order_block_reading()
             auto_users = get_all_auto_users()
 
             for uid in auto_users:
@@ -196,8 +204,9 @@ def auto_market_scanner():
                 trade = get_trade(uid)
                 amount = 100.0
 
+                # 1. فتح صفقة جديدة عند كشف Order Block
                 if not trade and w['usdt'] >= amount:
-                    if smart_signal:
+                    if ob_signal:
                         usdt_after_fee = amount * (1 - FEE)
                         btc_bought = usdt_after_fee / current_price
                         
@@ -205,23 +214,41 @@ def auto_market_scanner():
                         w['btc'] += btc_bought
                         update_wallet(uid, w['usdt'], w['btc'])
 
-                        target_tp = current_price * 1.020 # هدف 2.0%
-                        stop_sl = current_price * 0.990  # وقف 1.0%
+                        target_tp = current_price * 1.025 # هدف ممتاز +2.5%
+                        stop_sl = ob_bottom if ob_bottom > 0 else current_price * 0.991  # قاع الـ Order Block كوقف خسارة
                         
-                        save_trade(uid, current_price, btc_bought, target_tp, stop_sl)
+                        save_trade(uid, current_price, btc_bought, target_tp, stop_sl, trailing_step=0)
                         
                         msg = (
-                            "🔥 **صفقة جديدة بناءً على هيكل السوق (SMC)!**\n\n"
-                            f"📈 **تم كسر الهيكل (MSS):** اخترق القمة ${prev_h:,.2f}\n"
-                            "⚡ **تأكيد الفجوة (FVG):** سيولة شراء مؤسسية عالية\n"
-                            f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
-                            f"🎯 **هدف الربح (TP +2%):** ${target_tp:,.2f}\n"
-                            f"🛡️ **وقف الخسارة (SL -1%):** ${stop_sl:,.2f}\n"
-                            f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
+                            "🧱 **تم كشف منطقة طلب مؤسسية (Order Block)!**\n\n"
+                            f"📈 **حجم الانفجار السعري:** ممتاز 🚀\n"
+                            f"📍 **منطقة الطلب (OB):** ${ob_bottom:,.2f} - ${ob_top:,.2f}\n"
+                            f"💵 **سعر الدخول:** ${current_price:,.2f}\n"
+                            f"🎯 **هدف الربح (TP +2.5%):** ${target_tp:,.2f}\n"
+                            f"🛡️ **وقف الخسارة الأولي:** ${stop_sl:,.2f}\n"
+                            f"💰 **رصيد المحفظة المتبقي:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
 
+                # 2. متابعة الصفقة الحالية + تفعيل ملاحقة الأرباح (Trailing Stop)
                 elif trade:
+                    entry = trade['entry_price']
+                    step = trade['trailing_step']
+
+                    # --- خوارزمية ملاحقة الأرباح (Trailing Stop) ---
+                    # الخطوة 1: عند تحقيق +1.0% ربح -> نقل الوقف لنقطة الدخول (Break Even)
+                    if current_price >= entry * 1.010 and step < 1:
+                        new_sl = entry
+                        update_trade_sl(uid, new_sl, 1)
+                        bot.send_message(uid, f"🛡️ **تحديث أمان (Trailing Stop):**\nارتفع السعر +1%! تم رفع وقف الخسارة تلقائياً إلى نقطة الدخول (${new_sl:,.2f}) لضمان عدم الخسارة نهائياً.")
+
+                    # الخطوة 2: عند تحقيق +1.8% ربح -> تأمين +1.0% أرباح صافية في الجيب
+                    elif current_price >= entry * 1.018 and step < 2:
+                        new_sl = entry * 1.010
+                        update_trade_sl(uid, new_sl, 2)
+                        bot.send_message(uid, f"💰 **تأمين أرباح (Trailing Stop):**\nوصل الربح إلى +1.8%! تم رفع وقف الخسارة لتأمين +1.0% أرباح مؤكدة (${new_sl:,.2f}).")
+
+                    # --- إغلاق الصفقة عند الهدف أو الوقف المحدث ---
                     if current_price >= trade['tp']:
                         gross_returned = trade['btc_bought'] * current_price
                         usdt_returned = gross_returned * (1 - FEE)
@@ -234,7 +261,7 @@ def auto_market_scanner():
                         delete_trade(uid)
 
                         msg = (
-                            "🟢 **تم تحقيق هدف الربح المؤسسي (+2%)!**\n\n"
+                            "🟢 **تم تحقيق الهدف الكامل بنجاح (+2.5%)!**\n\n"
                             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
                             f"📈 **صافي الربح:** +${profit:.2f}\n"
                             f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
@@ -244,18 +271,21 @@ def auto_market_scanner():
                     elif current_price <= trade['sl']:
                         gross_returned = trade['btc_bought'] * current_price
                         usdt_returned = gross_returned * (1 - FEE)
-                        loss = usdt_returned - 100.0
+                        loss_or_profit = usdt_returned - 100.0
 
                         w['usdt'] += usdt_returned
                         w['btc'] = 0.0
                         update_wallet(uid, w['usdt'], w['btc'])
-                        record_history(uid, trade['entry_price'], current_price, loss)
+                        record_history(uid, trade['entry_price'], current_price, loss_or_profit)
                         delete_trade(uid)
 
+                        icon = "🟢" if loss_or_profit >= 0 else "🔴"
+                        status_title = "تأمين الأرباح" if loss_or_profit >= 0 else "وقف الخسارة"
+                        
                         msg = (
-                            "🔴 **تم ضرب وقف الخسارة الاحترازي!**\n\n"
+                            f"{icon} **تم الخروج بناءً على {status_title}!**\n\n"
                             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-                            f"📉 **النتيجة:** ${loss:.2f}\n"
+                            f"📊 **النتيجة:** {icon} ${loss_or_profit:+.2f}\n"
                             f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg)
@@ -265,6 +295,7 @@ def auto_market_scanner():
 
 threading.Thread(target=auto_market_scanner, daemon=True).start()
 
+# --- أوامر التلجرام والواجهة ---
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -275,12 +306,12 @@ def start(message):
         types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت بالاستراتيجية الذكية (MSS + FVG).", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت باستراتيجية مناطق الطلب (Order Block) وملاحقة الأرباح الذكية (Trailing Stop).", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الذكي القائم على هيكل السوق!**")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بمفهوم Order Blocks & Trailing Stop!**")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
@@ -347,7 +378,7 @@ def wallet(message):
     status = "مفعل 🟢" if is_auto_enabled(uid) else "معطل 🔴"
     trade_info = "لا يوجد صفقة قائمة"
     if trade:
-        trade_info = f"صفقة قائمة بسعر ${trade['entry_price']:,.2f}\n🎯 الهدف: ${trade['tp']:,.2f}\n🛡️ الوقف: ${trade['sl']:,.2f}"
+        trade_info = f"صفقة قائمة بسعر ${trade['entry_price']:,.2f}\n🎯 الهدف: ${trade['tp']:,.2f}\n🛡️ الوقف الحالي: ${trade['sl']:,.2f}"
 
     msg = (
         "💰 **المحفظة**\n\n"
