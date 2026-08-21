@@ -25,7 +25,7 @@ def get_wallet(user_id):
         user_wallet[user_id] = {'usdt': 1000.0, 'btc': 0.0}
     return user_wallet[user_id]
 
-# دالة الفحص الآلي المستمر في الخلفية
+# دالة الفحص الآلي المستمر وإدارة الصفقات (الشراء والبيع التلقائي)
 def auto_market_scanner():
     prev_price = get_live_btc_price()
     
@@ -37,34 +37,82 @@ def auto_market_scanner():
             # حساب نسبة التغير السريعة
             price_change = ((current_price - prev_price) / prev_price) * 100
             
-            # شرط الدخول التلقائي: إذا رصد صعود سريع بأكثر من 0.05%
-            if price_change >= 0.05:
-                for uid in list(auto_trading_users):
-                    w = get_wallet(uid)
-                    amount = 100.0
-                    
-                    # الدخول تلقائياً إذا لم تكن هناك صفقة مفتوحة والرصيد كافي
-                    if uid not in open_trades and w['usdt'] >= amount:
+            for uid in list(auto_trading_users):
+                w = get_wallet(uid)
+                amount = 100.0
+                
+                # 1. حالة الدخول الآلي (الشراء) عند رصد صعود
+                if uid not in open_trades and w['usdt'] >= amount:
+                    if price_change >= 0.05:
                         btc_bought = amount / current_price
                         w['usdt'] -= amount
                         w['btc'] += btc_bought
-                        open_trades[uid] = current_price
+                        
+                        # تحديد أهداف الربح والخسارة تلقائياً
+                        target_tp = current_price * 1.01  # هدف ربح +1%
+                        stop_sl = current_price * 0.995  # وقف خسارة -0.5%
+                        
+                        open_trades[uid] = {
+                            'entry_price': current_price,
+                            'btc_bought': btc_bought,
+                            'tp': target_tp,
+                            'sl': stop_sl
+                        }
                         
                         msg = (
-                            f"🤖 **إشعار دخول تلقائي!**\n\n"
-                            f"📈 **السبب:** رصد مؤشر صعود مفاجئ بنسبة (+{price_change:.2f}%)\n"
+                            f"🤖 **صفقة شراء آلية جديدة!**\n\n"
+                            f"📈 **السبب:** رصد صعود مفاجئ (+{price_change:.2f}%)\n"
                             f"🪙 **الزوج:** BTC/USDT\n"
                             f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
-                            f"⚡ **الكمية:** {btc_bought:.6f} BTC\n"
+                            f"🎯 **هدف الربح (TP):** ${target_tp:,.2f} (+1%)\n"
+                            f"🛡️ **وقف الخسارة (SL):** ${stop_sl:,.2f} (-0.5%)\n"
                             f"💰 **المتبقي في المحفظة:** ${w['usdt']:.2f}"
                         )
                         bot.send_message(uid, msg, parse_mode="Markdown")
-            
+
+                # 2. حالة التخارج الآلي (البيع) عند تحقق هدف الربح أو وقف الخسارة
+                elif uid in open_trades:
+                    trade = open_trades[uid]
+                    
+                    # تحقق هدف الربح (Take Profit)
+                    if current_price >= trade['tp']:
+                        usdt_returned = trade['btc_bought'] * current_price
+                        profit = usdt_returned - 100.0
+                        w['usdt'] += usdt_returned
+                        w['btc'] = 0.0
+                        del open_trades[uid]
+                        
+                        msg = (
+                            f"🟢 **تم جني الأرباح أوتوماتيكياً!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
+                            f"📉 **سعر الدخول:** ${trade['entry_price']:,.2f}\n"
+                            f"📈 **الربح الصافي:** +${profit:.2f}\n"
+                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
+                        )
+                        bot.send_message(uid, msg, parse_mode="Markdown")
+
+                    # تحقق وقف الخسارة (Stop Loss)
+                    elif current_price <= trade['sl']:
+                        usdt_returned = trade['btc_bought'] * current_price
+                        loss = usdt_returned - 100.0
+                        w['usdt'] += usdt_returned
+                        w['btc'] = 0.0
+                        del open_trades[uid]
+                        
+                        msg = (
+                            f"🔴 **تم تفعيل وقف الخسارة تلقائياً لحماية حسابك!**\n\n"
+                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
+                            f"📉 **سعر الدخول:** ${trade['entry_price']:,.2f}\n"
+                            f"📉 **الخسارة:** ${loss:.2f}\n"
+                            f"💰 **رصيد المحفظة الحالي:** ${w['usdt']:.2f}"
+                        )
+                        bot.send_message(uid, msg, parse_mode="Markdown")
+
             prev_price = current_price
         except Exception as e:
             print(f"Error in scanner: {e}")
 
-# تشغيل الفحص الآلي في خيط مستقل (Thread)
+# تشغيل الفحص والبيع/الشراء الآلي في الخلفية
 threading.Thread(target=auto_market_scanner, daemon=True).start()
 
 @bot.message_handler(commands=['start'])
@@ -73,31 +121,31 @@ def start(message):
     markup.add(
         types.KeyboardButton("🤖 تفعيل التداول الآلي"),
         types.KeyboardButton("🛑 إيقاف التداول الآلي"),
-        types.KeyboardButton("🎯 بيع وجني الأرباح"),
+        types.KeyboardButton("🎯 بيع يدوي إضطراري"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم إضافة نظام الرصد والدخول الآلي عند الصعود:", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تفعيل نظام التداول الآلي الكامل (شراء وبيع تلقائي مع Take Profit و Stop Loss):", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     uid = message.from_user.id
     auto_trading_users.add(uid)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل الرصد الآلي!**\nسيقوم البوت الآن بفحص السوق والدخول تلقائياً فور رصد أي إشارة صعود.", parse_mode="Markdown")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل الرصد والتداول الآلي!**\nالبوت يشتري ويبيع تلقائياً بحدد أرباح (+1%) ووقف خسارة (-0.5%).", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
     uid = message.from_user.id
     auto_trading_users.discard(uid)
-    bot.send_message(message.chat.id, "🛑 **تم إيقاف الرصد الآلي.**", parse_mode="Markdown")
+    bot.send_message(message.chat.id, "🛑 **تم إيقاف التداول الآلي.**", parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "🎯 بيع وجني الأرباح")
+@bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
 def sell_trade(message):
     uid = message.from_user.id
     w = get_wallet(uid)
     
     if uid in open_trades and w['btc'] > 0:
         current_price = get_live_btc_price()
-        entry_price = open_trades.pop(uid)
+        trade = open_trades.pop(uid)
         
         usdt_returned = w['btc'] * current_price
         profit = usdt_returned - 100.0
@@ -107,10 +155,10 @@ def sell_trade(message):
         
         icon = "🟢" if profit >= 0 else "🔴"
         msg = (
-            f"✅ **تم إغلاق الصفقة بنجاح!**\n\n"
+            f"⚡ **تم البيع اليدوي الإضطراري!**\n\n"
             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-            f"📉 **سعر الدخول:** ${entry_price:,.2f}\n"
-            f"{icon} **الربح/الخسارة:** ${profit:+.2f}\n"
+            f"📉 **سعر الدخول:** ${trade['entry_price']:,.2f}\n"
+            f"{icon} **النتيجة:** ${profit:+.2f}\n"
             f"💰 **رصيد المحفظة الجديد:** ${w['usdt']:.2f}"
         )
     else:
@@ -126,13 +174,18 @@ def wallet(message):
     total = w['usdt'] + (w['btc'] * price)
     
     status = "مفعل 🟢" if uid in auto_trading_users else "معطل 🔴"
-    
+    trade_info = "لا يوجد صفقة قائمة"
+    if uid in open_trades:
+        t = open_trades[uid]
+        trade_info = f"صفقة مفتوحة بسعر ${t['entry_price']:,.2f}\n🎯 الهدف: ${t['tp']:,.2f}\n🛡️ الوقف: ${t['sl']:,.2f}"
+
     msg = (
         f"💰 **المحفظة**\n\n"
         f"💵 **الدولار:** ${w['usdt']:.2f}\n"
         f"🪙 **البيتكوين:** {w['btc']:.6f} BTC\n"
         f"💎 **الإجمالي الحي:** ${total:.2f}\n\n"
-        f"🤖 **حالة الرصد الآلي:** {status}"
+        f"🤖 **حالة النظام الآلي:** {status}\n"
+        f"📊 **حالة الصفقة:** {trade_info}"
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
