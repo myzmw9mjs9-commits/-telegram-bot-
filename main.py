@@ -12,6 +12,39 @@ user_wallet = {}
 open_trades = {}
 auto_trading_users = set()
 
+# دالة جلب أسعار الإغلاق لحساب مؤشر RSI و EMA
+def get_klines_data():
+    try:
+        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30"
+        response = requests.get(url, timeout=5).json()
+        closes = [float(k[4]) for k in response]
+        return closes
+    except:
+        return []
+
+# دالة حساب مؤشر RSI (Relative Strength Index)
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        if change >= 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+            
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
 def get_live_btc_price():
     try:
         url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
@@ -25,31 +58,34 @@ def get_wallet(user_id):
         user_wallet[user_id] = {'usdt': 1000.0, 'btc': 0.0}
     return user_wallet[user_id]
 
-# دالة الفحص الآلي المستمر وإدارة الصفقات (الشراء والبيع التلقائي)
+# دالة الفحص الآلي المتقدم (12 قراءة في الدقيقة + تحليل RSI و EMA)
 def auto_market_scanner():
     prev_price = get_live_btc_price()
     
     while True:
         try:
-            time.sleep(10) # فحص كل 10 ثوانٍ
+            time.sleep(5)  # قراءة كل 5 ثوانٍ (12 قراءة في الدقيقة)
             current_price = get_live_btc_price()
-            
-            # حساب نسبة التغير السريعة
             price_change = ((current_price - prev_price) / prev_price) * 100
             
+            # جلب البيانات لحساب RSI والمتوسط
+            prices = get_klines_data()
+            rsi = calculate_rsi(prices) if prices else 50.0
+            ema_short = sum(prices[-5:]) / 5 if len(prices) >= 5 else current_price
+
             for uid in list(auto_trading_users):
                 w = get_wallet(uid)
                 amount = 100.0
                 
-                # 1. حالة الدخول الآلي (الشراء) عند رصد صعود
+                # شرط دخول الصفقة الدقيق: صعود مفاجئ + RSI ممتاز (بين 35 و 65) + السعر فوق المتوسط Short EMA
                 if uid not in open_trades and w['usdt'] >= amount:
-                    if price_change >= 0.05:
+                    if price_change >= 0.04 and 35 <= rsi <= 65 and current_price >= ema_short:
                         btc_bought = amount / current_price
                         w['usdt'] -= amount
                         w['btc'] += btc_bought
                         
-                        target_tp = current_price * 1.01  # هدف ربح +1%
-                        stop_sl = current_price * 0.995  # وقف خسارة -0.5%
+                        target_tp = current_price * 1.01   # هدف ربح +1%
+                        stop_sl = current_price * 0.995   # وقف خسارة -0.5%
                         
                         open_trades[uid] = {
                             'entry_price': current_price,
@@ -59,8 +95,9 @@ def auto_market_scanner():
                         }
                         
                         msg = (
-                            f"🤖 **صفقة شراء آلية جديدة!**\n\n"
-                            f"📈 **السبب:** رصد صعود مفاجئ (+{price_change:.2f}%)\n"
+                            f"🤖 **صفقة شراء آلية مسبقة الفحص!**\n\n"
+                            f"📈 **السبب:** رصد صعود (+{price_change:.2f}%)\n"
+                            f"📊 **مؤشر RSI:** {rsi:.1f} (منطقة آمنة)\n"
                             f"🪙 **الزوج:** BTC/USDT\n"
                             f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
                             f"🎯 **هدف الربح (TP):** ${target_tp:,.2f} (+1%)\n"
@@ -69,10 +106,11 @@ def auto_market_scanner():
                         )
                         bot.send_message(uid, msg, parse_mode="Markdown")
 
-                # 2. حالة التخارج الآلي (البيع) عند تحقق هدف الربح أو وقف الخسارة
+                # حالة التخارج والبيع الأوتوماتيكي
                 elif uid in open_trades:
                     trade = open_trades[uid]
                     
+                    # جني الأرباح
                     if current_price >= trade['tp']:
                         usdt_returned = trade['btc_bought'] * current_price
                         profit = usdt_returned - 100.0
@@ -89,6 +127,7 @@ def auto_market_scanner():
                         )
                         bot.send_message(uid, msg, parse_mode="Markdown")
 
+                    # وقف الخسارة
                     elif current_price <= trade['sl']:
                         usdt_returned = trade['btc_bought'] * current_price
                         loss = usdt_returned - 100.0
@@ -97,7 +136,7 @@ def auto_market_scanner():
                         del open_trades[uid]
                         
                         msg = (
-                            f"🔴 **تم تفعيل وقف الخسارة تلقائياً لحماية حسابك!**\n\n"
+                            f"🔴 **تم تفعيل وقف الخسارة تلقائياً!**\n\n"
                             f"💵 **سعر البيع:** ${current_price:,.2f}\n"
                             f"📉 **سعر الدخول:** ${trade['entry_price']:,.2f}\n"
                             f"📉 **الخسارة:** ${loss:.2f}\n"
@@ -109,7 +148,6 @@ def auto_market_scanner():
         except Exception as e:
             print(f"Error in scanner: {e}")
 
-# تشغيل الفحص والبيع/الشراء الآلي في الخلفية
 threading.Thread(target=auto_market_scanner, daemon=True).start()
 
 @bot.message_handler(commands=['start'])
@@ -121,13 +159,13 @@ def start(message):
         types.KeyboardButton("🎯 بيع يدوي إضطراري"),
         types.KeyboardButton("💰 المحفظة")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تفعيل نظام التداول الآلي الكامل (شراء وبيع تلقائي مع Take Profit و Stop Loss):", reply_markup=markup)
+    bot.send_message(message.chat.id, "أهلاً بك! تم تفعيل نظام التداول الآلي المطور بحساب مؤشر RSI و EMA:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def enable_auto(message):
     uid = message.from_user.id
     auto_trading_users.add(uid)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل الرصد والتداول الآلي!**\nالبوت يشتري ويبيع تلقائياً بحدد أرباح (+1%) ووقف خسارة (-0.5%).", parse_mode="Markdown")
+    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي الذكي!**\nالبوت يحلل 12 مرة بالدقيقة مع دمج مؤشرات RSI و EMA.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def disable_auto(message):
