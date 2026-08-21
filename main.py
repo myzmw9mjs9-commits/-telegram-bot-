@@ -33,6 +33,17 @@ def init_db():
             user_id INTEGER PRIMARY KEY
         )
     ''')
+    # جدول سجل الصفقات الأرباح/الخسائر
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            entry_price REAL,
+            exit_price REAL,
+            pnl REAL,
+            timestamp TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -82,6 +93,25 @@ def get_trade(user_id):
     if row:
         return {'entry_price': row[0], 'btc_bought': row[1], 'tp': row[2], 'sl': row[3]}
     return None
+
+def record_history(user_id, entry_price, exit_price, pnl):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    date_str = time.strftime("%Y-%m-%d %H:%M")
+    cursor.execute("INSERT INTO history (user_id, entry_price, exit_price, pnl, timestamp) VALUES (?, ?, ?, ?, ?)", 
+                   (user_id, entry_price, exit_price, pnl, date_str))
+    conn.commit()
+    conn.close()
+
+def get_user_history(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT entry_price, exit_price, pnl, timestamp FROM history WHERE user_id=? ORDER BY id DESC LIMIT 5", (user_id,))
+    rows = cursor.fetchall()
+    cursor.execute("SELECT SUM(pnl) FROM history WHERE user_id=?", (user_id,))
+    total_pnl = cursor.fetchone()[0] or 0.0
+    conn.close()
+    return rows, total_pnl
 
 def is_auto_enabled(user_id):
     conn = sqlite3.connect("bot_database.db")
@@ -198,6 +228,7 @@ def auto_market_scanner():
                         w['usdt'] += usdt_returned
                         w['btc'] = 0.0
                         update_wallet(uid, w['usdt'], w['btc'])
+                        record_history(uid, trade['entry_price'], current_price, profit)
                         delete_trade(uid)
 
                         msg = (
@@ -216,6 +247,7 @@ def auto_market_scanner():
                         w['usdt'] += usdt_returned
                         w['btc'] = 0.0
                         update_wallet(uid, w['usdt'], w['btc'])
+                        record_history(uid, trade['entry_price'], current_price, loss)
                         delete_trade(uid)
 
                         msg = (
@@ -239,6 +271,7 @@ def start(message):
         types.KeyboardButton("🤖 تفعيل التداول الآلي"),
         types.KeyboardButton("🛑 إيقاف التداول الآلي"),
         types.KeyboardButton("🎯 بيع يدوي إضطراري"),
+        types.KeyboardButton("📊 سجل الأرباح"),
         types.KeyboardButton("💰 المحفظة")
     )
     bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت بنجاح.", reply_markup=markup)
@@ -252,6 +285,25 @@ def enable_auto(message):
 def disable_auto(message):
     set_auto_status(message.from_user.id, False)
     bot.send_message(message.chat.id, "🛑 تم إيقاف التداول الآلي.")
+
+@bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
+def history(message):
+    uid = message.from_user.id
+    rows, total_pnl = get_user_history(uid)
+    
+    if not rows:
+        bot.send_message(message.chat.id, "📂 لا يوجد لديك سجل صفقات مكتملة حتى الآن.")
+        return
+
+    msg = "📊 سجل آخر الصفقات المكتملة:\n\n"
+    for r in rows:
+        entry, exit_p, pnl, dt = r
+        icon = "🟢" if pnl >= 0 else "🔴"
+        msg += f"🗓️ {dt}\n💵 دخول: ${entry:,.2f} | خروج: ${exit_p:,.2f}\n{icon} النتيجة: ${pnl:+.2f}\n--------------------\n"
+    
+    total_icon = "🟢" if total_pnl >= 0 else "🔴"
+    msg += f"\n💰 إجمالي الأرباح/الخسائر: {total_icon} ${total_pnl:+.2f}"
+    bot.send_message(message.chat.id, msg)
 
 @bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
 def sell_trade(message):
@@ -268,6 +320,7 @@ def sell_trade(message):
         w['usdt'] += usdt_returned
         w['btc'] = 0.0
         update_wallet(uid, w['usdt'], w['btc'])
+        record_history(uid, trade['entry_price'], current_price, profit)
         delete_trade(uid)
 
         icon = "🟢" if profit >= 0 else "🔴"
