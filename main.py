@@ -1,458 +1,289 @@
-import telebot
-from telebot import types
-import requests
-import threading
-import time
+import logging
 import sqlite3
+import requests
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
+from telebot import TeleBot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = "8811018278:AAHox1l1Xaq5weFW5ScT53lFuvtJeJ_lrR8"
-bot = telebot.TeleBot(TOKEN)
+# ==========================================
+# 1. الإعدادات الأساسية والتكوين (Configuration)
+# ==========================================
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+DB_PATH = "trading_bot.db"
+FEE = 0.001  # رسوم التداول 0.1%
 
-# --- 1. إعداد قاعدة البيانات SQLite ---
+bot = TeleBot(BOT_TOKEN)
+
+# أقفال التزامن للسلامة (Thread Safety)
+db_lock = Lock()
+cache_lock = Lock()
+
+# كاش الأسعار المحلي
+PRICE_CACHE = {}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# ==========================================
+# 2. إدارة قاعدة البيانات (SQLite Setup)
+# ==========================================
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def init_db():
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS wallets (
-            user_id INTEGER PRIMARY KEY,
-            usdt REAL,
-            btc REAL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            user_id INTEGER PRIMARY KEY,
-            entry_price REAL,
-            btc_bought REAL,
-            tp REAL,
-            sl REAL,
-            trailing_step INTEGER DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS auto_users (
-            user_id INTEGER PRIMARY KEY
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            entry_price REAL,
-            exit_price REAL,
-            pnl REAL,
-            timestamp TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- 2. إدارة قاعدة البيانات والمحفظة ---
-def get_wallet(user_id):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT usdt, btc FROM wallets WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if not row:
-        cursor.execute("INSERT INTO wallets VALUES (?, ?, ?)", (user_id, 1000.0, 0.0))
+    with db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # جدول المستخدمين
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL DEFAULT 1000.0
+            )
+        """)
+        # جدول الصفقات
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                symbol TEXT,
+                type TEXT,
+                entry_price REAL,
+                amount REAL,
+                margin REAL
+            )
+        """)
         conn.commit()
-        usdt, btc = 1000.0, 0.0
-    else:
-        usdt, btc = row[0], row[1]
-    conn.close()
-    return {'usdt': usdt, 'btc': btc}
+        conn.close()
 
-def update_wallet(user_id, usdt, btc):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE wallets SET usdt=?, btc=? WHERE user_id=?", (user_id, usdt, btc))
-    conn.commit()
-    conn.close()
-
-def save_trade(user_id, entry_price, btc_bought, tp, sl, trailing_step=0):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("REPLACE INTO trades VALUES (?, ?, ?, ?, ?, ?)", (user_id, entry_price, btc_bought, tp, sl, trailing_step))
-    conn.commit()
-    conn.close()
-
-def update_trade_sl(user_id, new_sl, new_step):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE trades SET sl=?, trailing_step=? WHERE user_id=?", (new_sl, new_step, user_id))
-    conn.commit()
-    conn.close()
-
-def delete_trade(user_id):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM trades WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def get_trade(user_id):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT entry_price, btc_bought, tp, sl, trailing_step FROM trades WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {'entry_price': row[0], 'btc_bought': row[1], 'tp': row[2], 'sl': row[3], 'trailing_step': row[4]}
-    return None
-
-def record_history(user_id, entry_price, exit_price, pnl):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    date_str = time.strftime("%Y-%m-%d %H:%M")
-    cursor.execute("INSERT INTO history (user_id, entry_price, exit_price, pnl, timestamp) VALUES (?, ?, ?, ?, ?)", 
-                   (user_id, entry_price, exit_price, pnl, date_str))
-    conn.commit()
-    conn.close()
-
-def get_user_history(user_id):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT entry_price, exit_price, pnl, timestamp FROM history WHERE user_id=? ORDER BY id DESC LIMIT 5", (user_id,))
-    rows = cursor.fetchall()
-    cursor.execute("SELECT SUM(pnl) FROM history WHERE user_id=?", (user_id,))
-    total_pnl = cursor.fetchone()[0] or 0.0
-    conn.close()
-    return rows, total_pnl
-
-def is_auto_enabled(user_id):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM auto_users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row is not None
-
-def set_auto_status(user_id, enable):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    if enable:
-        cursor.execute("REPLACE INTO auto_users VALUES (?)", (user_id,))
-    else:
-        cursor.execute("DELETE FROM auto_users WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def get_all_auto_users():
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM auto_users")
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# --- 3. حساب جميع المؤشرات الفنية المتقدمة ---
-def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return 50.0
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(diff if diff > 0 else 0)
-        losses.append(abs(diff) if diff < 0 else 0)
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-def calculate_ema(closes, period):
-    if len(closes) < period:
-        return closes[-1]
-    multiplier = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    for price in closes[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def calculate_macd(closes):
-    if len(closes) < 26:
-        return 0, 0
-    ema12 = calculate_ema(closes, 12)
-    ema26 = calculate_ema(closes, 26)
-    macd_line = ema12 - ema26
-    signal_line = macd_line * 0.8  
-    return macd_line, signal_line
-
-def calculate_bollinger_bands(closes, period=20, std_dev=2):
-    if len(closes) < period:
-        return closes[-1], closes[-1]
-    slice_c = closes[-period:]
-    sma = sum(slice_c) / period
-    variance = sum((x - sma) ** 2 for x in slice_c) / period
-    std = variance ** 0.5
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return lower, upper
-
-# --- 4. التحليل الكلي الشامل لجميع الاستراتيجيات ---
-def analyze_all_strategies():
+# ==========================================
+# 3. جلب الأسعار والاتصال بـ Binance API
+# ==========================================
+def get_live_price_fast(symbol):
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=60"
-        res = requests.get(url, timeout=5).json()
-        
-        opens = [float(k[1]) for k in res]
-        highs = [float(k[2]) for k in res]
-        lows = [float(k[3]) for k in res]
-        closes = [float(k[4]) for k in res]
-        vols = [float(k[5]) for k in res]
-        current_price = closes[-1]
-
-        # حساب المؤشرات
-        rsi = calculate_rsi(closes)
-        ema20 = calculate_ema(closes, 20)
-        ema50 = calculate_ema(closes, 50)
-        macd, macd_signal = calculate_macd(closes)
-        bb_lower, bb_upper = calculate_bollinger_bands(closes)
-
-        # 1. استراتيجية المؤشرات المدمجة (RSI + EMA + MACD)
-        if (rsi <= 40) and (ema20 >= ema50) and (macd > macd_signal):
-            return True, "المؤشرات الكلاسيكية (RSI + EMA + MACD)", current_price, current_price * 0.992
-
-        # 2. استراتيجية MSS + FVG (اختراق الهيكل والفجوة)
-        previous_high = max(highs[-12:-2])
-        if (current_price > previous_high) and (lows[-1] > highs[-3]):
-            return True, "اختراق الهيكل والفجوة (MSS + FVG)", current_price, current_price * 0.990
-
-        # 3. استراتيجية Order Block (مناطق الطلب)
-        is_explosion = (closes[-2] - opens[-2]) / opens[-2] > 0.012
-        if is_explosion and (closes[-3] < opens[-3]):
-            sl_p = lows[-3] if lows[-3] > 0 else current_price * 0.991
-            return True, "مناطق الطلب (Order Block)", current_price, sl_p
-
-        # 4. استراتيجية اختراق الفوليوم العالي (Volume Breakout)
-        avg_vol = sum(vols[-10:-1]) / 9
-        if (vols[-1] > avg_vol * 2.0) and (closes[-1] > max(highs[-6:-1])):
-            return True, "انفجار الفوليوم والكسر (Volume Breakout)", current_price, current_price * 0.991
-
-        # 5. استراتيجية بولينجر باندز + RSI (Bollinger Squeeze Bounce)
-        if (current_price <= bb_lower * 1.002) and (rsi < 35):
-            return True, "ارتداد بولينجر باندز (Bollinger Bands + RSI)", current_price, current_price * 0.990
-
-        # 6. استراتيجية التقاطع الذهبي (EMA Golden Cross)
-        if (ema20 > ema50) and (calculate_ema(closes[:-1], 20) <= calculate_ema(closes[:-1], 50)):
-            return True, "التقاطع الذهبي للمتوسطات (Golden Cross)", current_price, current_price * 0.988
-
-        # 7. استراتيجية الدايفرجنس الايجابي (RSI Bullish Divergence)
-        if (closes[-1] < min(closes[-10:-1])) and (rsi > min([calculate_rsi(closes[:i]) for i in range(len(closes)-10, len(closes)-1)])):
-            return True, "دايفرجنس إيجابي (RSI Bullish Divergence)", current_price, current_price * 0.991
-
-        return False, None, current_price, 0.0
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        response = requests.get(url, timeout=1.5)
+        if response.status_code == 200:
+            price = float(response.json()["price"])
+            with cache_lock:
+                PRICE_CACHE[symbol] = price
+            return price
+        logging.warning(f"فشل جلب سعر {symbol} من API (رمز الحالة: {response.status_code})")
     except Exception as e:
-        return False, None, 0.0, 0.0
+        logging.error(f"خطأ أثناء الاتصال بـ Binance لـ {symbol}: {e}")
+    
+    # خيار احتياطي: إرجاع السعر المخزن في الكاش
+    with cache_lock:
+        return PRICE_CACHE.get(symbol)
 
-def get_live_btc_price():
-    try:
-        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        res = requests.get(url, timeout=5).json()
-        return float(res['price'])
-    except:
-        return 65000.0
-
-# --- 5. الماسح الآلي الشامل بالسوق ---
-def auto_market_scanner():
-    FEE = 0.001
-
-    while True:
+def fetch_prices_for_symbols(symbols):
+    results = {}
+    if not symbols:
+        return results
+        
+    # تحديد عدد العمال بحيث لا يتجاوز 10 لمنع الضغط
+    max_workers = min(10, len(symbols))
+    
+    def _fetch(sym):
         try:
-            time.sleep(10)
-            current_price = get_live_btc_price()
-            has_signal, strat_name, entry_p, stop_sl = analyze_all_strategies()
-            auto_users = get_all_auto_users()
-
-            for uid in auto_users:
-                w = get_wallet(uid)
-                trade = get_trade(uid)
-                amount = w['usdt'] * 0.05
-
-                # فتح صفقة تلقائية
-                if not trade and w['usdt'] >= amount and has_signal:
-                    usdt_after_fee = amount * (1 - FEE)
-                    btc_bought = usdt_after_fee / current_price
-                    
-                    w['usdt'] -= amount
-                    w['btc'] += btc_bought
-                    update_wallet(uid, w['usdt'], w['btc'])
-
-                    target_tp = current_price * 1.04 # هدف 2%
-                    stop_sl = current_price * 0.98
-                    save_trade(uid, current_price, btc_bought, target_tp, stop_sl, trailing_step=0)
-            
-                    msg = (
-                        f"🔥 **صفقة جديدة تلقائية!**\n\n"
-                        f"📊 **الاستراتيجية:** {strat_name}\n"
-                        f"💵 **سعر الشراء:** ${current_price:,.2f}\n"
-                        f"🎯 **الهدف (TP +4%):** ${target_tp:,.2f}\n"
-                        f"🛡️ **وقف الخسارة (SL -2‎%‎):** ${stop_sl:,.2f}\n"
-                        f"💰 **المتبقي بالمحفظة:** ${w['usdt']:.2f}"
-                    )
-                    bot.send_message(uid, msg)
-
-                # إدارة الصفقة والقواعد الحالية
-                elif trade:
-                    entry = trade['entry_price']
-                    step = trade['trailing_step']
-
-                    # Trailing Stop: تأمين الأرباح
-                    if current_price >= entry * 1.010 and step < 1:
-                        update_trade_sl(uid, entry, 1)
-                        bot.send_message(uid, f"🛡️ **Trailing Stop:** تم رفع وقف الخسارة لسعر الدخول (${entry:,.2f}) لتأمين الصفقة.")
-                    elif current_price >= entry * 1.018 and step < 2:
-                        new_sl = entry * 1.010
-                        update_trade_sl(uid, new_sl, 2)
-                        bot.send_message(uid, f"💰 **Trailing Stop:** تم رفع وقف الخسارة لتأمين أرباح +1.0% (${new_sl:,.2f}).")
-
-                    # تحقيق الهدف أو الخروج عند الوقف
-                    if current_price >= trade['tp']:
-                        gross_returned = trade['btc_bought'] * current_price
-                        usdt_returned = gross_returned * (1 - FEE)
-                        profit = usdt_returned - 100.0
-
-                        w['usdt'] += usdt_returned
-                        w['btc'] = 0.0
-                        update_wallet(uid, w['usdt'], w['btc'])
-                        record_history(uid, trade['entry_price'], current_price, profit)
-                        delete_trade(uid)
-
-                        msg = (
-                            "🟢 **تم تحقيق هدف الربح (+2%)!**\n\n"
-                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-                            f"📈 **صافي الربح:** +${profit:.2f}\n"
-                            f"💰 **رصيد المحفظة:** ${w['usdt']:.2f}"
-                        )
-                        bot.send_message(uid, msg)
-
-                    elif current_price <= trade['sl']:
-                        gross_returned = trade['btc_bought'] * current_price
-                        usdt_returned = gross_returned * (1 - FEE)
-                        res_pnl = usdt_returned - 100.0
-
-                        w['usdt'] += usdt_returned
-                        w['btc'] = 0.0
-                        update_wallet(uid, w['usdt'], w['btc'])
-                        record_history(uid, trade['entry_price'], current_price, res_pnl)
-                        delete_trade(uid)
-
-                        icon = "🟢" if res_pnl >= 0 else "🔴"
-                        msg = (
-                            f"{icon} **تم الخروج من الصفقة!**\n\n"
-                            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-                            f"📊 **النتيجة:** {icon} ${res_pnl:+.2f}\n"
-                            f"💰 **رصيد المحفظة:** ${w['usdt']:.2f}"
-                        )
-                        bot.send_message(uid, msg)
-
+            return sym, get_live_price_fast(sym)
         except Exception as e:
-            print(f"Scanner error: {e}")
+            logging.error(f"خطأ غير متوقع أثناء جلب {sym}: {e}")
+            return sym, None
 
-threading.Thread(target=auto_market_scanner, daemon=True).start()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch, sym) for sym in symbols]
+        for future in futures:
+            sym, price = future.result()
+            if price is not None:
+                results[sym] = price
+                
+    return results
 
-# --- 6. أزرار وأوامر التلجرام ---
-@bot.message_handler(commands=['start'])
-def start(message):
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+# ==========================================
+# 4. منطق إغلاق الصفقات وحساب الأرباح والرسوم
+# ==========================================
+def close_user_position(pos_id, current_price):
+    with db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # جلب تفاصيل الصفقة
+        cursor.execute("SELECT * FROM positions WHERE id = ?", (pos_id,))
+        pos = cursor.fetchone()
+        if not pos:
+            conn.close()
+            return None
+        
+        user_id = pos["user_id"]
+        
+        # جلب رصيد المستخدم
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            conn.close()
+            logging.warning(f"المستخدم {user_id} غير موجود في قاعدة البيانات.")
+            return None
+            
+        current_balance = user["balance"]
+        
+        # حساب PnL
+        entry = pos["entry_price"]
+        amount = pos["amount"]
+        is_long = pos["type"].upper() == "LONG"
+        
+        pnl = (current_price - entry) * amount if is_long else (entry - current_price) * amount
+        
+        # خصم الرسوم من المبلغ العائد
+        gross_return = pos["margin"] + pnl
+        net_return = max(0.0, gross_return * (1 - FEE))
+        
+        new_balance = current_balance + net_return
+        
+        # تحديث الرصيد وحذف الصفقة
+        cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+        cursor.execute("DELETE FROM positions WHERE id = ?", (pos_id,))
+        conn.commit()
+        conn.close()
+        
+        return {
+            "symbol": pos["symbol"],
+            "pnl": pnl,
+            "net_return": net_return,
+            "fee_deducted": gross_return * FEE,
+            "new_balance": new_balance
+        }
+
+# ==========================================
+# 5. بناء لوحة التحكم وأزرار التليجرام (UI)
+# ==========================================
+def get_user_dashboard_data(user_id):
+    with db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # ضمان وجود المستخدم
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 1000.0)", (user_id,))
+        conn.commit()
+        
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        balance = cursor.fetchone()["balance"]
+        
+        cursor.execute("SELECT * FROM positions WHERE user_id = ?", (user_id,))
+        positions = cursor.fetchall()
+        conn.close()
+        
+    symbols = list(set([p["symbol"] for p in positions]))
+    prices = fetch_prices_for_symbols(symbols)
+    
+    pos_data_list = []
+    total_pnl = 0.0
+    
+    for p in positions:
+        sym = p["symbol"]
+        curr_p = prices.get(sym, p["entry_price"])
+        is_long = p["type"].upper() == "LONG"
+        pnl = (curr_p - p["entry_price"]) * p["amount"] if is_long else (p["entry_price"] - curr_p) * p["amount"]
+        total_pnl += pnl
+        
+        pos_data_list.append({
+            "id": p["id"],
+            "symbol": sym,
+            "type": p["type"],
+            "pnl": pnl,
+            "current_price": curr_p
+        })
+        
+    return balance, total_pnl, pos_data_list
+
+def build_dashboard_markup(positions_data):
+    markup = InlineKeyboardMarkup(row_width=1)
+    
+    for pos in positions_data:
+        btn_text = f"❌ إغلاق {pos['symbol']} ({pos['type']}) | PnL: {pos['pnl']:.2f}$"
+        markup.add(InlineKeyboardButton(text=btn_text, callback_data=f"close_{pos['id']}"))
+    
     markup.add(
-        types.KeyboardButton("🤖 تفعيل التداول الآلي"),
-        types.KeyboardButton("🛑 إيقاف التداول الآلي"),
-        types.KeyboardButton("🎯 بيع يدوي إضطراري"),
-        types.KeyboardButton("📊 سجل الأرباح"),
-        types.KeyboardButton("💰 المحفظة")
+        InlineKeyboardButton(text="🔄 تحديث اللوحة", callback_data="refresh_dashboard"),
+        InlineKeyboardButton(text="⚠️ إغلاق كافة الصفقات", callback_data="close_all")
     )
-    bot.send_message(message.chat.id, "أهلاً بك! تم تشغيل البوت الشامل بكافة استراتيجيات ومؤشرات التداول العالمية والمتقدمة.", reply_markup=markup)
+    return markup
 
-@bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
-def enable_auto(message):
-    set_auto_status(message.from_user.id, True)
-    bot.send_message(message.chat.id, "✅ **تم تفعيل التداول الآلي بكامل الاستراتيجيات الشاملة!**")
-
-@bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
-def disable_auto(message):
-    set_auto_status(message.from_user.id, False)
-    bot.send_message(message.chat.id, "🛑 **تم إيقاف التداول الآلي.**")
-
-@bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
-def history(message):
-    uid = message.from_user.id
-    rows, total_pnl = get_user_history(uid)
+# ==========================================
+# 6. معالجات أوامر التليجرام (Telegram Handlers)
+# ==========================================
+@bot.message_handler(commands=['start', 'dashboard'])
+def send_dashboard(message):
+    user_id = message.from_user.id
+    balance, total_pnl, positions = get_user_dashboard_data(user_id)
     
-    if not rows:
-        bot.send_message(message.chat.id, "📂 لا يوجد لديك سجل صفقات مكتملة حتى الآن.")
-        return
-
-    msg = "📊 **سجل الصفقات المكتملة:**\n\n"
-    for r in rows:
-        entry, exit_p, pnl, dt = r
-        icon = "🟢" if pnl >= 0 else "🔴"
-        msg += f"🗓️ {dt}\n💵 دخول: ${entry:,.2f} | خروج: ${exit_p:,.2f}\n{icon} النتيجة: ${pnl:+.2f}\n--------------------\n"
+    text = f"📊 **لوحة تحكم التداول**\n\n"
+    text += f"💰 **الرصيد المتاح:** `${balance:.2f}`\n"
+    text += f"📈 **إجمالي الأرباح/الخسائر:** `${total_pnl:.2f}`\n"
+    text += f"🔓 **عدد الصفقات المفتوحة:** `{len(positions)}`"
     
-    total_icon = "🟢" if total_pnl >= 0 else "🔴"
-    msg += f"\n💰 **إجمالي الأرباح/الخسائر:** {total_icon} ${total_pnl:+.2f}"
-    bot.send_message(message.chat.id, msg)
+    markup = build_dashboard_markup(positions)
+    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
-def sell_trade(message):
-    uid = message.from_user.id
-    w = get_wallet(uid)
-    trade = get_trade(uid)
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    user_id = call.from_user.id
+    
+    if call.data == "refresh_dashboard":
+        balance, total_pnl, positions = get_user_dashboard_data(user_id)
+        text = f"📊 **لوحة تحكم التداول**\n\n"
+        text += f"💰 **الرصيد المتاح:** `${balance:.2f}`\n"
+        text += f"📈 **إجمالي الأرباح/الخسائر:** `${total_pnl:.2f}`\n"
+        text += f"🔓 **عدد الصفقات المفتوحة:** `{len(positions)}`"
+        
+        markup = build_dashboard_markup(positions)
+        try:
+            bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "تم تحديث البيانات!")
+        except Exception:
+            bot.answer_callback_query(call.id, "البيانات محدثة بالفعل.")
 
-    if trade and w['btc'] > 0:
-        current_price = get_live_btc_price()
-        gross_returned = w['btc'] * current_price
-        usdt_returned = gross_returned * (1 - 0.001)
-        profit = usdt_returned - 100.0
+    elif call.data.startswith("close_"):
+        if call.data == "close_all":
+            _, _, positions = get_user_dashboard_data(user_id)
+            for pos in positions:
+                close_user_position(pos["id"], pos["current_price"])
+            bot.answer_callback_query(call.id, "تم إغلاق جميع الصفقات بنجاح!")
+        else:
+            pos_id = int(call.data.split("_")[1])
+            # جلب السعر الحالي
+            with db_lock:
+                conn = get_db_connection()
+                pos = conn.execute("SELECT symbol FROM positions WHERE id = ?", (pos_id,)).fetchone()
+                conn.close()
+            
+            if pos:
+                live_price = get_live_price_fast(pos["symbol"])
+                res = close_user_position(pos_id, live_price)
+                if res:
+                    bot.answer_callback_query(call.id, f"تم إغلاق {res['symbol']} بنجاح! PnL: {res['pnl']:.2f}$")
+            else:
+                bot.answer_callback_query(call.id, "الصفقة مغلقة بالفعل!")
+        
+        # تحديث اللوحة بعد الإغلاق
+        balance, total_pnl, positions = get_user_dashboard_data(user_id)
+        text = f"📊 **لوحة تحكم التداول**\n\n"
+        text += f"💰 **الرصيد المتاح:** `${balance:.2f}`\n"
+        text += f"📈 **إجمالي الأرباح/الخسائر:** `${total_pnl:.2f}`\n"
+        text += f"🔓 **عدد الصفقات المفتوحة:** `{len(positions)}`"
+        
+        markup = build_dashboard_markup(positions)
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
-        w['usdt'] += usdt_returned
-        w['btc'] = 0.0
-        update_wallet(uid, w['usdt'], w['btc'])
-        record_history(uid, trade['entry_price'], current_price, profit)
-        delete_trade(uid)
-
-        icon = "🟢" if profit >= 0 else "🔴"
-        msg = (
-            "⚡ **تم البيع اليدوي الإضطراري!**\n\n"
-            f"💵 **سعر البيع:** ${current_price:,.2f}\n"
-            f"{icon} **صافي النتيجة:** ${profit:+.2f}\n"
-            f"💰 **رصيد المحفظة الجديد:** ${w['usdt']:.2f}"
-        )
-    else:
-        msg = "❌ **لا توجد صفقات مفتوحة حالياً!**"
-
-    bot.send_message(message.chat.id, msg)
-
-@bot.message_handler(func=lambda m: m.text == "💰 المحفظة")
-def wallet(message):
-    uid = message.from_user.id
-    w = get_wallet(uid)
-    trade = get_trade(uid)
-    price = get_live_btc_price()
-    total = w['usdt'] + (w['btc'] * price)
-
-    status = "مفعل 🟢" if is_auto_enabled(uid) else "معطل 🔴"
-    trade_info = "لا يوجد صفقة قائمة"
-    if trade:
-        trade_info = f"صفقة قائمة بسعر ${trade['entry_price']:,.2f}\n🎯 الهدف: ${trade['tp']:,.2f}\n🛡️ الوقف الحالي: ${trade['sl']:,.2f}"
-
-    msg = (
-        "💰 **المحفظة**\n\n"
-        f"💵 **الدولار:** ${w['usdt']:.2f}\n"
-        f"🪙 **البيتكوين:** {w['btc']:.6f} BTC\n"
-        f"💎 **الإجمالي الحي:** ${total:.2f}\n\n"
-        f"🤖 **حالة التداول الآلي:** {status}\n"
-        f"📊 **حالة الصفقة:**\n{trade_info}"
-    )
-    bot.send_message(message.chat.id, msg)
-
-if __name__ == '__main__':
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-    except:
-        pass
-    bot.infinity_polling(skip_pending=True)
+# ==========================================
+# 7. نقطة التشغيل الرئيسية (Main)
+# ==========================================
+if __name__ == "__main__":
+    init_db()
+    logging.info("تم تشغيل البوت بنجاح وهو جاهز لاستقبال الأوامر...")
+    bot.infinity_polling()
