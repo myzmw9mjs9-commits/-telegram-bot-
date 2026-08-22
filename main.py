@@ -10,7 +10,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 # 1. إعدادات البوت وقاعدة البيانات والذاكرة
 # ==========================================
-BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"  # ضع توكنك هن
+BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 db_lock = threading.Lock()
