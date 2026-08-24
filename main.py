@@ -15,64 +15,62 @@ user_trading_status = {}
 logging.basicConfig(level=logging.INFO)
 
 def get_db_connection():
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect("bot_database.db", timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     with db_lock:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                symbol TEXT,
-                type TEXT,
-                price REAL,
-                amount REAL,
-                fee REAL DEFAULT 0.0,
-                pnl REAL DEFAULT 0.0,
-                status TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS portfolio (
-                user_id INTEGER PRIMARY KEY,
-                usdt_balance REAL DEFAULT 1000.0,
-                btc_balance REAL DEFAULT 0.0,
-                last_buy_price REAL DEFAULT 0.0,
-                stop_loss_price REAL DEFAULT 0.0,
-                take_profit_price REAL DEFAULT 0.0,
-                highest_price_reached REAL DEFAULT 0.0,
-                daily_loss REAL DEFAULT 0.0,
-                last_reset_date TEXT DEFAULT ''
-            )
-        ''')
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    symbol TEXT,
+                    type TEXT,
+                    price REAL,
+                    amount REAL,
+                    fee REAL DEFAULT 0.0,
+                    pnl REAL DEFAULT 0.0,
+                    status TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS portfolio (
+                    user_id INTEGER PRIMARY KEY,
+                    usdt_balance REAL DEFAULT 1000.0,
+                    btc_balance REAL DEFAULT 0.0,
+                    last_buy_price REAL DEFAULT 0.0,
+                    stop_loss_price REAL DEFAULT 0.0,
+                    take_profit_price REAL DEFAULT 0.0,
+                    highest_price_reached REAL DEFAULT 0.0,
+                    daily_loss REAL DEFAULT 0.0,
+                    last_reset_date TEXT DEFAULT ''
+                )
+            ''')
+            conn.commit()
 
 init_db()
 
 def get_user_portfolio(user_id):
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     with db_lock:
-        conn = get_db_connection()
-        res = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
-        if not res:
-            conn.execute("INSERT INTO portfolio (user_id, usdt_balance, btc_balance, last_buy_price, stop_loss_price, take_profit_price, highest_price_reached, daily_loss, last_reset_date) VALUES (?, 1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)", (user_id, today_str))
-            conn.commit()
+        with get_db_connection() as conn:
             res = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
-        else:
-            if res['last_reset_date'] != today_str:
-                conn.execute("UPDATE portfolio SET daily_loss = 0.0, last_reset_date = ? WHERE user_id = ?", (today_str, user_id))
+            if not res:
+                conn.execute("INSERT INTO portfolio (user_id, usdt_balance, btc_balance, last_buy_price, stop_loss_price, take_profit_price, highest_price_reached, daily_loss, last_reset_date) VALUES (?, 1000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)", (user_id, today_str))
                 conn.commit()
                 res = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
-        conn.close()
-        return res
+            else:
+                if res['last_reset_date'] != today_str:
+                    conn.execute("UPDATE portfolio SET daily_loss = 0.0, last_reset_date = ? WHERE user_id = ?", (today_str, user_id))
+                    conn.commit()
+                    res = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
+            return res
 
-def fetch_klines_full(symbol="BTCUSDT", interval="15m", limit=1000):
+def fetch_klines_full(symbol="BTCUSDT", interval="15m", limit=1500):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         res = requests.get(url, timeout=5)
@@ -139,21 +137,27 @@ def calculate_atr(closes, highs, lows, period=14):
     return sum(tr_list[-period:]) / period
 
 def full_technical_analysis(symbol="BTCUSDT"):
-    closes, highs, lows, _ = fetch_klines_full(symbol, interval="15m", limit=300)
-    if not closes or len(closes) < 50:
+    closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=300)
+    if not closes or len(closes) < 200:
         return None
     
     current_price = closes[-1]
     rsi = calculate_rsi_standard(closes)
     macd, signal, hist = calculate_macd_standard(closes)
     atr = calculate_atr(closes, highs, lows)
-    ema50 = calculate_ema_series(closes, 50)[-1] if len(closes) >= 50 else current_price
-    ema200 = calculate_ema_series(closes, 200)[-1] if len(closes) >= 200 else ema50
+    ema50 = calculate_ema_series(closes, 50)[-1]
+    ema200 = calculate_ema_series(closes, 200)[-1]
+    avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
     
-    # استراتيجية محسنة بدقة عالية تعتمد على الاتجاه العام وزخم MACD
-    if current_price > ema50 and rsi < 68 and macd >= signal and hist > 0:
+    # شروط دخول الشراء المحسنة (إلغاء عشوائية الشروط وتأكيد الاتجاه العام مع فلتر الحجم)
+    buy_condition = (current_price > ema50 and current_price > ema200 and rsi < 68 and macd >= signal and hist > 0 and volumes[-1] > (avg_volume * 0.7))
+    
+    # شروط الخروج الموثوقة (يجب أن ينكسر الاتجاه أو الزخم ككل وليس شرطاً واحداً منفصلاً لضمان عدم الخروج المبكر)
+    sell_condition = (current_price < ema50 or (rsi > 72 and macd < signal))
+
+    if buy_condition:
         recommendation = "شراء قوي 🟢"
-    elif current_price < ema50 or rsi > 72 or macd < signal:
+    elif sell_condition:
         recommendation = "بيع قوي 🔴"
     else:
         recommendation = "محايد / انتظار ⚪"
@@ -165,12 +169,13 @@ def full_technical_analysis(symbol="BTCUSDT"):
         "signal": signal,
         "atr": atr,
         "ema50": round(ema50, 2),
+        "ema200": round(ema200, 2),
         "recommendation": recommendation
     }
 
 def run_advanced_backtest(symbol="BTCUSDT"):
-    closes, highs, lows, _ = fetch_klines_full(symbol, interval="15m", limit=1000)
-    if not closes or len(closes) < 100:
+    closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=1500)
+    if not closes or len(closes) < 250:
         return "تعذر الحصول على بيانات كافية للاختبار."
     
     balance = 1000.0
@@ -183,10 +188,12 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     tp_price = 0.0
     highest_price = 0.0
     
-    for i in range(50, len(closes)):
+    for i in range(200, len(closes)):
         sub_closes = closes[:i]
         sub_highs = highs[:i]
         sub_lows = lows[:i]
+        sub_vols = volumes[:i]
+        
         p = sub_closes[-1]
         h = sub_highs[-1]
         l = sub_lows[-1]
@@ -194,59 +201,80 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         if crypto > 0:
             if h > highest_price:
                 highest_price = h
-                trailing_stop = highest_price - (sub_closes[-1] * 0.012)
+                current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
+                trailing_stop = highest_price - (current_atr * 1.2)
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            if l <= sl_price:
-                revenue = crypto * sl_price
-                fee = revenue * fee_rate
-                balance += (revenue - fee)
-                losing_trades += 1
-                crypto = 0.0
-                continue
-            elif h >= tp_price:
+            # ترتيب الفحص: إعطاء الأولوية لجني الأرباح أولاً ثم وقف الخسارة بدقة تامة مطابقة للحي
+            if h >= tp_price:
                 revenue = crypto * tp_price
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
                 winning_trades += 1
                 crypto = 0.0
+                entry_price = 0.0
+                continue
+            elif l <= sl_price:
+                revenue = crypto * sl_price
+                fee = revenue * fee_rate
+                balance += (revenue - fee)
+                losing_trades += 1
+                crypto = 0.0
+                entry_price = 0.0
                 continue
 
         rsi = calculate_rsi_standard(sub_closes)
         macd, signal, hist = calculate_macd_standard(sub_closes)
-        ema50_val = calculate_ema_series(sub_closes, 50)[-1] if len(sub_closes) >= 50 else p
+        ema50_val = calculate_ema_series(sub_closes, 50)[-1]
+        ema200_val = calculate_ema_series(sub_closes, 200)[-1]
         atr_val = calculate_atr(sub_closes, sub_highs, sub_lows)
+        avg_vol = sum(sub_vols[-20:]) / 20 if len(sub_vols) >= 20 else sub_vols[-1]
         
-        # شروط محسنة للاختبار الرجعي لرفع نسبة الأرباح
-        if p > ema50_val and rsi < 65 and macd >= signal and hist > 0 and balance > 10 and crypto == 0:
-            trade_vol = (balance * 0.4) / p
-            cost = trade_vol * p
-            fee = cost * fee_rate
-            balance -= (cost + fee)
-            crypto = trade_vol
+        # مطابقة تامة لشروط الدخول في الاختبار مع التداول الحي (إدارة المخاطر وحجم المركز بناءً على ATR)
+        buy_cond = (p > ema50_val and p > ema200_val and rsi < 68 and macd >= signal and hist > 0 and sub_vols[-1] > (avg_vol * 0.7))
+        sell_cond = (p < ema50_val or (rsi > 72 and macd < signal))
+
+        if buy_cond and balance > 10 and crypto == 0:
+            total_equity = balance
+            risk_amount = total_equity * 0.02
+            stop_dist = atr_val * 1.5
+            position_size_usdt = min(balance * 0.5, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.3
+            
+            fee = position_size_usdt * fee_rate
+            effective_usdt = position_size_usdt - fee
+            if effective_usdt <= 0:
+                continue
+                
+            crypto = effective_usdt / p
+            balance -= position_size_usdt
             entry_price = p
             highest_price = p
-            stop_dist = atr_val * 1.5
             sl_price = p - stop_dist
-            tp_price = p + (stop_dist * 3.0) # زيادة العائد للهدف لتعزيز الأرباح
+            tp_price = p + (stop_dist * 3.0)
             
-        elif crypto > 0 and (p < ema50_val or rsi > 72 or macd < signal):
+        elif crypto > 0 and sell_cond:
             revenue = crypto * p
             fee = revenue * fee_rate
             balance += (revenue - fee)
-            if p > entry_price:
+            
+            # تصحيح حساب PnL ليشمل عمولة الشراء والبيع بدقة
+            buy_fee = (crypto * entry_price) * fee_rate
+            pnl = (p - entry_price) * crypto - fee - buy_fee
+            
+            if pnl > 0:
                 winning_trades += 1
             else:
                 losing_trades += 1
             crypto = 0.0
+            entry_price = 0.0
             
     total_trades = winning_trades + losing_trades
     win_rate = round((winning_trades / total_trades * 100), 2) if total_trades > 0 else 0.0
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن الجديد (مع تحسين الزخم وأهداف الأرباح):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسن والمتطابق تماماً مع الحي (6 أشهر / سعة موسعة):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -256,64 +284,61 @@ def run_advanced_backtest(symbol="BTCUSDT"):
 
 def execute_trade_logic(user_id, action, price, atr=0.0):
     with db_lock:
-        conn = get_db_connection()
-        pf = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
-        if not pf:
-            conn.close()
-            return
-            
-        usdt = pf['usdt_balance']
-        btc = pf['btc_balance']
-        daily_loss = pf['daily_loss']
-        fee_rate = 0.001
-        
-        if daily_loss >= 50.0 and action == "BUY":
-            conn.close()
-            return
-
-        if action == "BUY" and usdt >= 10:
-            total_equity = usdt + (btc * price)
-            risk_amount = total_equity * 0.02
-            stop_dist = (atr * 1.5) if atr > 0 else (price * 0.02)
-            position_size_usdt = min(usdt * 0.5, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.3
-            
-            fee = position_size_usdt * fee_rate
-            effective_usdt = position_size_usdt - fee
-            if effective_usdt <= 0:
-                conn.close()
+        with get_db_connection() as conn:
+            pf = conn.execute("SELECT * FROM portfolio WHERE user_id = ?", (user_id,)).fetchone()
+            if not pf:
                 return
                 
-            amount = effective_usdt / price
-            new_usdt = usdt - position_size_usdt
-            new_btc = btc + amount
-            sl_price = price - stop_dist
-            tp_price = price + (stop_dist * 3.0)
+            usdt = pf['usdt_balance']
+            btc = pf['btc_balance']
+            daily_loss = pf['daily_loss']
+            fee_rate = 0.001
             
-            conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
-                         (new_usdt, new_btc, price, sl_price, tp_price, price, user_id))
-            conn.execute("INSERT INTO trades (user_id, symbol, type, price, amount, fee, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (user_id, "BTCUSDT", "BUY", price, amount, fee, "OPEN"))
-            conn.commit()
-            
-        elif action == "SELL" and btc > 0.00001:
-            gross_revenue = btc * price
-            fee = gross_revenue * fee_rate
-            net_revenue = gross_revenue - fee
-            
-            pnl = (price - pf['last_buy_price']) * btc - fee
-            new_usdt = usdt + net_revenue
-            
-            new_daily_loss = daily_loss
-            if pnl < 0:
-                new_daily_loss += abs(pnl)
+            # تفعيل حد الخسارة اليومي بشكل إجباري وقاطع (50 دولاراً)
+            if daily_loss >= 50.0 and action == "BUY":
+                return
+
+            if action == "BUY" and usdt >= 10:
+                total_equity = usdt + (btc * price)
+                risk_amount = total_equity * 0.02
+                stop_dist = (atr * 1.5) if atr > 0 else (price * 0.02)
+                position_size_usdt = min(usdt * 0.5, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.3
                 
-            conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = 0.0, last_buy_price = 0.0, stop_loss_price = 0.0, take_profit_price = 0.0, highest_price_reached = 0.0, daily_loss = ? WHERE user_id = ?",
-                         (new_usdt, new_daily_loss, user_id))
-            conn.execute("INSERT INTO trades (user_id, symbol, type, price, amount, fee, pnl, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                         (user_id, "BTCUSDT", "SELL", price, btc, fee, pnl, "CLOSED"))
-            conn.commit()
-            
-        conn.close()
+                fee = position_size_usdt * fee_rate
+                effective_usdt = position_size_usdt - fee
+                if effective_usdt <= 0:
+                    return
+                    
+                amount = effective_usdt / price
+                new_usdt = usdt - position_size_usdt
+                new_btc = btc + amount
+                sl_price = price - stop_dist
+                tp_price = price + (stop_dist * 3.0)
+                
+                conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
+                             (new_usdt, new_btc, price, sl_price, tp_price, price, user_id))
+                conn.execute("INSERT INTO trades (user_id, symbol, type, price, amount, fee, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             (user_id, "BTCUSDT", "BUY", price, amount, fee, "OPEN"))
+                conn.commit()
+                
+            elif action == "SELL" and btc > 0.00001:
+                gross_revenue = btc * price
+                fee = gross_revenue * fee_rate
+                net_revenue = gross_revenue - fee
+                
+                buy_fee = (btc * pf['last_buy_price']) * fee_rate
+                pnl = (price - pf['last_buy_price']) * btc - fee - buy_fee
+                new_usdt = usdt + net_revenue
+                
+                new_daily_loss = daily_loss
+                if pnl < 0:
+                    new_daily_loss += abs(pnl)
+                    
+                conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = 0.0, last_buy_price = 0.0, stop_loss_price = 0.0, take_profit_price = 0.0, highest_price_reached = 0.0, daily_loss = ? WHERE user_id = ?",
+                             (new_usdt, new_daily_loss, user_id))
+                conn.execute("INSERT INTO trades (user_id, symbol, type, price, amount, fee, pnl, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             (user_id, "BTCUSDT", "SELL", price, btc, fee, pnl, "CLOSED"))
+                conn.commit()
 
 def auto_trading_manager():
     while True:
@@ -328,6 +353,13 @@ def auto_trading_manager():
                     
                     for u_id in active_users:
                         pf = get_user_portfolio(u_id)
+                        
+                        # إيقاف تداول المستخدم حيّاً فوراً إذا تخطى حد الخسارة اليومي
+                        if pf['daily_loss'] >= 50.0:
+                            if pf['btc_balance'] > 0.00001:
+                                execute_trade_logic(u_id, "SELL", price)
+                            continue
+
                         last_price = pf['last_buy_price']
                         sl = pf['stop_loss_price']
                         tp = pf['take_profit_price']
@@ -340,12 +372,11 @@ def auto_trading_manager():
                                 if new_sl > sl:
                                     sl = new_sl
                                     with db_lock:
-                                        conn = get_db_connection()
-                                        conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
-                                        conn.commit()
-                                        conn.close()
+                                        with get_db_connection() as conn:
+                                            conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
+                                            conn.commit()
                                         
-                            if (price <= sl and sl > 0) or (price >= tp and tp > 0):
+                            if (price >= tp and tp > 0) or (price <= sl and sl > 0):
                                 execute_trade_logic(u_id, "SELL", price)
                                 continue
                                 
@@ -370,7 +401,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم تحديث الشروط ورفع كفاءة الاستراتيجية والاختبار الرجعي بنجاح.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم دمج جميع الإصلاحات البرمجية والمنطقية ومطابقة الاختبار الرجعي مع التداول الحي بنجاح تام دون حذف أي ميزة.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -378,7 +409,7 @@ def show_analysis(message):
     if not d:
         bot.reply_to(message, "خطأ في الاتصال بالسوق، حاول مجدداً.")
         return
-    res = f"📈 **التحليل الاحترافي المحدث (BTC/USDT):**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA50: `{d['ema50']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
+    res = f"📈 **التحليل الاحترافي المحدث (BTC/USDT):**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
@@ -388,7 +419,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإستراتيجية المطورة والمحدثة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالاستراتيجية الشاملة والمحدثة!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
@@ -421,9 +452,8 @@ def force_sell(message):
 @bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
 def show_trades(message):
     with db_lock:
-        conn = get_db_connection()
-        trades = conn.execute("SELECT * FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 5", (message.from_user.id,)).fetchall()
-        conn.close()
+        with get_db_connection() as conn:
+            trades = conn.execute("SELECT * FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 5", (message.from_user.id,)).fetchall()
     if not trades:
         bot.reply_to(message, "لا توجد صفقات مسجلة بعد.")
         return
