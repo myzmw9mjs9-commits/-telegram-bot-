@@ -201,17 +201,33 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if h > highest_price:
                 highest_price = h
                 current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
-                trailing_stop = highest_price - (current_atr * 2.0) # تم ضبط الترايلينج
+                trailing_stop = highest_price - (current_atr * 2.0)
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            if h >= tp_price:
+            # فحص SL و TP مع إعطاء الأولوية للأسعار داخل الشمعة بدقة
+            if h >= tp_price and l <= sl_price:
+                # إذا تداخلا في نفس الشمعة، نفترض ضرب الوقف أولاً لتحفظ الاستراتيجية
+                revenue = crypto * sl_price
+                fee = revenue * fee_rate
+                balance += (revenue - fee)
+                losing_trades += 1
+                crypto = 0.0
+                entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                highest_price = 0.0
+                continue
+            elif h >= tp_price:
                 revenue = crypto * tp_price
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
                 winning_trades += 1
                 crypto = 0.0
                 entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                highest_price = 0.0
                 continue
             elif l <= sl_price:
                 revenue = crypto * sl_price
@@ -220,6 +236,9 @@ def run_advanced_backtest(symbol="BTCUSDT"):
                 losing_trades += 1
                 crypto = 0.0
                 entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                highest_price = 0.0
                 continue
 
         rsi = calculate_rsi_standard(sub_closes)
@@ -235,7 +254,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         if buy_cond and balance > 10 and crypto == 0:
             total_equity = balance
             risk_amount = total_equity * 0.02
-            stop_dist = atr_val * 2.5  # تم تعديل معامل وقف الخسارة ليعطي مساحة للسعر
+            stop_dist = atr_val * 2.5
             position_size_usdt = min(balance * 0.5, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.3
             
             fee = position_size_usdt * fee_rate
@@ -243,12 +262,14 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if effective_usdt <= 0:
                 continue
                 
+            # تصحيح سعر الدخول الفعلي بعد خصم العمولة مسبقاً لتجنب تضخيم الأرباح
+            actual_entry_price = p * (position_size_usdt / effective_usdt)
             crypto = effective_usdt / p
             balance -= position_size_usdt
-            entry_price = p
+            entry_price = actual_entry_price
             highest_price = p
             sl_price = p - stop_dist
-            tp_price = p + (stop_dist * 2.0)  # تم تقريب الهدف ليصبح متوازناً (2x)
+            tp_price = p + (stop_dist * 2.0)
             
         elif crypto > 0 and sell_cond:
             revenue = crypto * p
@@ -262,13 +283,16 @@ def run_advanced_backtest(symbol="BTCUSDT"):
                 losing_trades += 1
             crypto = 0.0
             entry_price = 0.0
+            sl_price = 0.0
+            tp_price = 0.0
+            highest_price = 0.0
             
     total_trades = winning_trades + losing_trades
     win_rate = round((winning_trades / total_trades * 100), 2) if total_trades > 0 else 0.0
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بناءً على أحدث سعة بيانات):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسن (شامل التصحيحات):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -303,6 +327,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     if effective_usdt <= 0:
                         return
                         
+                    actual_entry_price = price * (position_size_usdt / effective_usdt)
                     amount = effective_usdt / price
                     new_usdt = usdt - position_size_usdt
                     new_btc = btc + amount
@@ -310,7 +335,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     tp_price = price + (stop_dist * 2.0)
                     
                     conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
-                                 (new_usdt, new_btc, price, sl_price, tp_price, price, user_id))
+                                 (new_usdt, new_btc, actual_entry_price, sl_price, tp_price, price, user_id))
                     conn.execute("INSERT INTO trades (user_id, symbol, type, price, amount, fee, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
                                  (user_id, "BTCUSDT", "BUY", price, amount, fee, "OPEN"))
                     
@@ -349,10 +374,12 @@ def auto_trading_manager():
                         
                         last_buy = pf['last_buy_price']
                         btc_amt = pf['btc_balance']
+                        
+                        # فحص حد الخسارة اليومية بالاعتماد على أدنى سعر للشمعة (Low) بدلاً من الإغلاق فقط لحماية أفضل
                         if btc_amt > 0.00001 and last_buy > 0:
-                            current_unrealized_pnl = (price - last_buy) * btc_amt
-                            if current_unrealized_pnl < 0 and abs(current_unrealized_pnl) >= (50.0 - pf['daily_loss']):
-                                execute_trade_logic(u_id, "SELL", price)
+                            potential_unrealized_pnl = (low_p - last_buy) * btc_amt
+                            if potential_unrealized_pnl < 0 and abs(potential_unrealized_pnl) >= (50.0 - pf['daily_loss']):
+                                execute_trade_logic(u_id, "SELL", low_p)
                                 continue
 
                         if pf['daily_loss'] >= 50.0:
@@ -375,7 +402,11 @@ def auto_trading_manager():
                                             with conn:
                                                 conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
                                         
-                            if high_p >= tp and tp > 0:
+                            # فحص دقيق لمنطق SL و TP في التداول الحي
+                            if high_p >= tp and tp > 0 and low_p <= sl and sl > 0:
+                                execute_trade_logic(u_id, "SELL", sl)
+                                continue
+                            elif high_p >= tp and tp > 0:
                                 execute_trade_logic(u_id, "SELL", tp)
                                 continue
                             elif low_p <= sl and sl > 0:
@@ -406,7 +437,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم ضبط إعدادات إدارة المخاطر وتصحيح نسب الأهداف ووقف الخسارة لتصبح النتائج متوازنة ومنطقية.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم دمج جميع الإصلاحات الشاملة (حسابات PnL، الـ Stop/Take Profit المطور، وحد الخسارة الذكي) بنجاح.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -424,7 +455,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإعدادات الجديدة والمتوازنة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالنسخة الشاملة والمطورة!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
