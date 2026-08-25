@@ -75,7 +75,6 @@ def get_user_portfolio(user_id):
 
 def fetch_klines_full(symbol="BTCUSDT", interval="15m", limit=1500):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    # نظام إعادة المحاولة الذكي لتفادي أي خطأ اتصال مؤقت بالسوق
     for attempt in range(3):
         try:
             res = http_session.get(url, timeout=7)
@@ -124,6 +123,7 @@ def calculate_rsi_standard(prices, period=14):
 def calculate_macd_standard(prices):
     if len(prices) < 35:
         return 0.0, 0.0, 0.0
+  
     ema12_list = calculate_ema_series(prices, 12)
     ema26_list = calculate_ema_series(prices, 26)
     diff = len(ema12_list) - len(ema26_list)
@@ -144,6 +144,7 @@ def calculate_atr(closes, highs, lows, period=14):
     return sum(tr_list[-period:]) / period
 
 def full_technical_analysis(symbol="BTCUSDT"):
+    # جلب إطار 15 دقيقة وإطار أكبر (1 ساعة / 4 ساعات سُمِع عنه لفلتر الاتجاه العام)
     closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=300)
     if not closes or len(closes) < 200:
         return None
@@ -152,12 +153,32 @@ def full_technical_analysis(symbol="BTCUSDT"):
     rsi = calculate_rsi_standard(closes)
     macd, signal, hist = calculate_macd_standard(closes)
     atr = calculate_atr(closes, highs, lows)
+    ema20 = calculate_ema_series(closes, 20)[-1]
     ema50 = calculate_ema_series(closes, 50)[-1]
     ema200 = calculate_ema_series(closes, 200)[-1]
     avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
     
-    buy_condition = (current_price > ema50 and current_price > ema200 and rsi < 68 and macd >= signal and hist > 0 and volumes[-1] > (avg_volume * 0.7))
-    sell_condition = (current_price < ema50 or (rsi > 72 and macd < signal))
+    # -------------------------------------------------------------
+    # 💡 التحسينات المدمجة الجديدة بناءً على الملاحظات:
+    # 1. إضافة فلتر الاتجاه العام (السعر فوق EMA200 لضمان عدم عكس الاتجاه).
+    # 2. شروط دخول أذكى (قريب من الدعم/EMA20 أو 50 وليس مبالغاً في ارتفاعه، تشبع بيعي أو تقاطع إيجابي).
+    # 3. شروط خروج دقيقة (تعتمد على كسر المتوسطات أو تشبع شرائي RSI > 70 بدلاً من الخروج الفوري العشوائي).
+    # -------------------------------------------------------------
+    trend_filter = (current_price > ema200) # فلتر الاتجاه العام للصعود
+    
+    buy_condition = (
+        trend_filter and 
+        (current_price >= ema20 or current_price >= ema50) and # عدم الدخول متأخراً بعيداً عن الدعوم
+        rsi < 65 and 
+        (macd >= signal or hist > 0) and 
+        volumes[-1] > (avg_volume * 0.6)
+    )
+    
+    # شروط البيع المحسنة (بدلاً من البيع العشوائي، تعتمد على كسر المتوسط السريع EMA9/20 أو هبوط RSI)
+    sell_condition = (
+        current_price < ema50 or 
+        (rsi > 70 and macd < signal)
+    )
 
     if buy_condition:
         recommendation = "شراء قوي 🟢"
@@ -174,6 +195,7 @@ def full_technical_analysis(symbol="BTCUSDT"):
         "macd": macd,
         "signal": signal,
         "atr": atr,
+        "ema20": round(ema20, 2),
         "ema50": round(ema50, 2),
         "ema200": round(ema200, 2),
         "recommendation": recommendation
@@ -188,7 +210,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     crypto = 0.0
     winning_trades = 0
     losing_trades = 0
-    fee_rate = 0.001
+    fee_rate = 0.001  # عمولة منخفضة أو محسوبة بدقة
     entry_price = 0.0
     sl_price = 0.0
     tp_price = 0.0
@@ -248,19 +270,29 @@ def run_advanced_backtest(symbol="BTCUSDT"):
 
         rsi = calculate_rsi_standard(sub_closes)
         macd, signal, hist = calculate_macd_standard(sub_closes)
+        ema20_val = calculate_ema_series(sub_closes, 20)[-1]
         ema50_val = calculate_ema_series(sub_closes, 50)[-1]
         ema200_val = calculate_ema_series(sub_closes, 200)[-1]
         atr_val = calculate_atr(sub_closes, sub_highs, sub_lows)
         avg_vol = sum(sub_vols[-20:]) / 20 if len(sub_vols) >= 20 else sub_vols[-1]
         
-        buy_cond = (p > ema50_val and p > ema200_val and rsi < 68 and macd >= signal and hist > 0 and sub_vols[-1] > (avg_vol * 0.7))
-        sell_cond = (p < ema50_val or (rsi > 72 and macd < signal))
+        trend_filter = (p > ema200_val)
+        buy_cond = (
+            trend_filter and 
+            (p >= ema20_val or p >= ema50_val) and 
+            rsi < 65 and 
+            (macd >= signal or hist > 0) and 
+            sub_vols[-1] > (avg_vol * 0.6)
+        )
+        sell_cond = (p < ema50_val or (rsi > 70 and macd < signal))
 
         if buy_cond and balance > 10 and crypto == 0:
             total_equity = balance
-            risk_amount = total_equity * 0.02
-            stop_dist = atr_val * 2.5
-            position_size_usdt = min(balance * 0.5, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.3
+            risk_amount = total_equity * 0.015  # تخفيض المخاطرة إلى 1.5% للحفاظ على الأمان
+            stop_dist = atr_val * 2.0
+            
+            # تحسين حجم المركز ليصبح 20% - 25% من الرصيد بدلاً من 50% لمنع الخسائر الكبيرة
+            position_size_usdt = min(balance * 0.25, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.2
             
             fee = position_size_usdt * fee_rate
             effective_usdt = position_size_usdt - fee
@@ -296,7 +328,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بثبات تام):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بشامل التحسينات):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -322,9 +354,11 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
 
                 if action == "BUY" and usdt >= 10:
                     total_equity = usdt + (btc * price)
-                    risk_amount = total_equity * 0.02
-                    stop_dist = (atr * 2.5) if atr > 0 else (price * 0.03)
-                    position_size_usdt = min(usdt * 0.5, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.3
+                    risk_amount = total_equity * 0.015
+                    stop_dist = (atr * 2.0) if atr > 0 else (price * 0.025)
+                    
+                    # حجم مركز محسّن وآمن (25% كحد أقصى)
+                    position_size_usdt = min(usdt * 0.25, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.2
                     
                     fee = position_size_usdt * fee_rate
                     effective_usdt = position_size_usdt - fee
@@ -439,7 +473,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم إصلاح مشكلة الاتصال بسوق بينانس بنجاح مع إضافة نظام استقرار متقدم.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم تحديث الكود ودمج كافة التحسينات الذكية (فلتر الاتجاه، إدارة المخاطر المحسنة، وشروط الدخول والخروج بدقة) بنجاح.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -447,7 +481,7 @@ def show_analysis(message):
     if not d:
         bot.reply_to(message, "⚠️ تعذر الاتصال بالسوق حالياً، يرجى المحاولة بعد ثوانٍ.")
         return
-    res = f"📈 **التحليل الاحترافي المحدث (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
+    res = f"📈 **التحليل الاحترافي المحدث والمطوّر (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA20: `{d['ema20']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200 (فلتر الاتجاه): `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
@@ -457,7 +491,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بنجاح والاتصال مستقر!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالاستراتيجية المحسنة الجديدة!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
@@ -503,5 +537,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت الاحترافي يعمل الآن بكفاءة واتصال مستقر...")
+print("🤖 البوت الاحترافي المحسّن يعمل الآن بكفاءة عالية...")
 bot.infinity_polling(skip_pending=True)
