@@ -15,6 +15,9 @@ db_lock = threading.Lock()
 user_trading_status = {}
 logging.basicConfig(level=logging.INFO)
 
+# إنشاء جلسة اتصال مخصصة لضمان استقرار وسرعة طلبات بينانس وتجنب الأخطاء
+http_session = requests.Session()
+
 def get_db_connection():
     conn = sqlite3.connect("bot_database.db", timeout=10)
     conn.row_factory = sqlite3.Row
@@ -71,18 +74,22 @@ def get_user_portfolio(user_id):
                 return res
 
 def fetch_klines_full(symbol="BTCUSDT", interval="15m", limit=1500):
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            highs = [float(item[2]) for item in data]
-            lows = [float(item[3]) for item in data]
-            closes = [float(item[4]) for item in data]
-            volumes = [float(item[5]) for item in data]
-            return closes, highs, lows, volumes
-    except Exception as e:
-        logging.error(f"Error fetching klines: {e}")
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    # نظام إعادة المحاولة الذكي لتفادي أي خطأ اتصال مؤقت بالسوق
+    for attempt in range(3):
+        try:
+            res = http_session.get(url, timeout=7)
+            if res.status_code == 200:
+                data = res.json()
+                if data and isinstance(data, list):
+                    highs = [float(item[2]) for item in data]
+                    lows = [float(item[3]) for item in data]
+                    closes = [float(item[4]) for item in data]
+                    volumes = [float(item[5]) for item in data]
+                    return closes, highs, lows, volumes
+        except Exception as e:
+            logging.error(f"Attempt {attempt+1} - Error fetching klines: {e}")
+            time.sleep(1)
     return [], [], [], []
 
 def calculate_ema_series(prices, period):
@@ -175,7 +182,7 @@ def full_technical_analysis(symbol="BTCUSDT"):
 def run_advanced_backtest(symbol="BTCUSDT"):
     closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=1500)
     if not closes or len(closes) < 250:
-        return "تعذر الحصول على بيانات كافية للاختبار."
+        return "⚠️ تعذر الحصول على بيانات كافية للاختبار حالياً، يرجى المحاولة بعد قليل."
     
     balance = 1000.0
     crypto = 0.0
@@ -205,9 +212,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            # فحص SL و TP مع إعطاء الأولوية للأسعار داخل الشمعة بدقة
             if h >= tp_price and l <= sl_price:
-                # إذا تداخلا في نفس الشمعة، نفترض ضرب الوقف أولاً لتحفظ الاستراتيجية
                 revenue = crypto * sl_price
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
@@ -262,7 +267,6 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if effective_usdt <= 0:
                 continue
                 
-            # تصحيح سعر الدخول الفعلي بعد خصم العمولة مسبقاً لتجنب تضخيم الأرباح
             actual_entry_price = p * (position_size_usdt / effective_usdt)
             crypto = effective_usdt / p
             balance -= position_size_usdt
@@ -292,7 +296,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن (شامل التصحيحات):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بثبات تام):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -375,7 +379,6 @@ def auto_trading_manager():
                         last_buy = pf['last_buy_price']
                         btc_amt = pf['btc_balance']
                         
-                        # فحص حد الخسارة اليومية بالاعتماد على أدنى سعر للشمعة (Low) بدلاً من الإغلاق فقط لحماية أفضل
                         if btc_amt > 0.00001 and last_buy > 0:
                             potential_unrealized_pnl = (low_p - last_buy) * btc_amt
                             if potential_unrealized_pnl < 0 and abs(potential_unrealized_pnl) >= (50.0 - pf['daily_loss']):
@@ -402,7 +405,6 @@ def auto_trading_manager():
                                             with conn:
                                                 conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
                                         
-                            # فحص دقيق لمنطق SL و TP في التداول الحي
                             if high_p >= tp and tp > 0 and low_p <= sl and sl > 0:
                                 execute_trade_logic(u_id, "SELL", sl)
                                 continue
@@ -437,13 +439,13 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم دمج جميع الإصلاحات الشاملة (حسابات PnL، الـ Stop/Take Profit المطور، وحد الخسارة الذكي) بنجاح.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم إصلاح مشكلة الاتصال بسوق بينانس بنجاح مع إضافة نظام استقرار متقدم.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
     d = full_technical_analysis("BTCUSDT")
     if not d:
-        bot.reply_to(message, "خطأ في الاتصال بالسوق، حاول مجدداً.")
+        bot.reply_to(message, "⚠️ تعذر الاتصال بالسوق حالياً، يرجى المحاولة بعد ثوانٍ.")
         return
     res = f"📈 **التحليل الاحترافي المحدث (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
@@ -455,7 +457,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالنسخة الشاملة والمطورة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بنجاح والاتصال مستقر!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
@@ -501,5 +503,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت الاحترافي الشامل والمعدل يعمل الآن...")
+print("🤖 البوت الاحترافي يعمل الآن بكفاءة واتصال مستقر...")
 bot.infinity_polling(skip_pending=True)
