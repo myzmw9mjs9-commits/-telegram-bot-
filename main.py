@@ -201,7 +201,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if h > highest_price:
                 highest_price = h
                 current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
-                trailing_stop = highest_price - (current_atr * 1.2)
+                trailing_stop = highest_price - (current_atr * 2.0) # تم ضبط الترايلينج
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
@@ -235,7 +235,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         if buy_cond and balance > 10 and crypto == 0:
             total_equity = balance
             risk_amount = total_equity * 0.02
-            stop_dist = atr_val * 1.5
+            stop_dist = atr_val * 2.5  # تم تعديل معامل وقف الخسارة ليعطي مساحة للسعر
             position_size_usdt = min(balance * 0.5, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.3
             
             fee = position_size_usdt * fee_rate
@@ -248,7 +248,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             entry_price = p
             highest_price = p
             sl_price = p - stop_dist
-            tp_price = p + (stop_dist * 3.0)
+            tp_price = p + (stop_dist * 2.0)  # تم تقريب الهدف ليصبح متوازناً (2x)
             
         elif crypto > 0 and sell_cond:
             revenue = crypto * p
@@ -295,7 +295,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                 if action == "BUY" and usdt >= 10:
                     total_equity = usdt + (btc * price)
                     risk_amount = total_equity * 0.02
-                    stop_dist = (atr * 1.5) if atr > 0 else (price * 0.02)
+                    stop_dist = (atr * 2.5) if atr > 0 else (price * 0.03)
                     position_size_usdt = min(usdt * 0.5, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.3
                     
                     fee = position_size_usdt * fee_rate
@@ -307,7 +307,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     new_usdt = usdt - position_size_usdt
                     new_btc = btc + amount
                     sl_price = price - stop_dist
-                    tp_price = price + (stop_dist * 3.0)
+                    tp_price = price + (stop_dist * 2.0)
                     
                     conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
                                  (new_usdt, new_btc, price, sl_price, tp_price, price, user_id))
@@ -347,7 +347,6 @@ def auto_trading_manager():
                     for u_id in active_users:
                         pf = get_user_portfolio(u_id)
                         
-                        # فحص لحظي ومستمر لحد الخسارة اليومي (حتى لو الصفقة مفتوحة وتجاوزت الخسارة 50$)
                         last_buy = pf['last_buy_price']
                         btc_amt = pf['btc_balance']
                         if btc_amt > 0.00001 and last_buy > 0:
@@ -368,7 +367,7 @@ def auto_trading_manager():
                         if last_buy > 0:
                             if high_p > highest:
                                 highest = high_p
-                                new_sl = highest - (atr * 1.2)
+                                new_sl = highest - (atr * 2.0)
                                 if new_sl > sl:
                                     sl = new_sl
                                     with db_lock:
@@ -376,7 +375,6 @@ def auto_trading_manager():
                                             with conn:
                                                 conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
                                         
-                            # فحص دقيق للـ TP و SL بناءً على أدنى وأعلى شعلة تماماً مثل الاختبار الرجعي
                             if high_p >= tp and tp > 0:
                                 execute_trade_logic(u_id, "SELL", tp)
                                 continue
@@ -408,7 +406,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم حل جميع مشاكل تسريب الاتصالات، وتصحيح حساب الأرباح (PnL)، ومطابقة الفحص الحي مع الاختبار الرجعي بالكامل دون حذف أي ميزة.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم ضبط إعدادات إدارة المخاطر وتصحيح نسب الأهداف ووقف الخسارة لتصبح النتائج متوازنة ومنطقية.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -426,7 +424,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالاستراتيجية الشاملة والمحدثة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإعدادات الجديدة والمتوازنة!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
