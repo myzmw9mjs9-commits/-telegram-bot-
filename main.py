@@ -15,7 +15,6 @@ db_lock = threading.Lock()
 user_trading_status = {}
 logging.basicConfig(level=logging.INFO)
 
-# إنشاء جلسة اتصال مخصصة لضمان استقرار وسرعة طلبات بينانس وتجنب الأخطاء
 http_session = requests.Session()
 
 def get_db_connection():
@@ -144,7 +143,6 @@ def calculate_atr(closes, highs, lows, period=14):
     return sum(tr_list[-period:]) / period
 
 def full_technical_analysis(symbol="BTCUSDT"):
-    # جلب إطار 15 دقيقة وإطار أكبر (1 ساعة / 4 ساعات سُمِع عنه لفلتر الاتجاه العام)
     closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=300)
     if not closes or len(closes) < 200:
         return None
@@ -158,26 +156,22 @@ def full_technical_analysis(symbol="BTCUSDT"):
     ema200 = calculate_ema_series(closes, 200)[-1]
     avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
     
-    # -------------------------------------------------------------
-    # 💡 التحسينات المدمجة الجديدة بناءً على الملاحظات:
-    # 1. إضافة فلتر الاتجاه العام (السعر فوق EMA200 لضمان عدم عكس الاتجاه).
-    # 2. شروط دخول أذكى (قريب من الدعم/EMA20 أو 50 وليس مبالغاً في ارتفاعه، تشبع بيعي أو تقاطع إيجابي).
-    # 3. شروط خروج دقيقة (تعتمد على كسر المتوسطات أو تشبع شرائي RSI > 70 بدلاً من الخروج الفوري العشوائي).
-    # -------------------------------------------------------------
-    trend_filter = (current_price > ema200) # فلتر الاتجاه العام للصعود
+    # تحسين الشروط لمنع كثرة الصفقات العرضية الخاسرة
+    trend_filter = (current_price > ema200 and ema50 > ema200) # اتجاه صاعد قوي مؤكد
     
     buy_condition = (
         trend_filter and 
-        (current_price >= ema20 or current_price >= ema50) and # عدم الدخول متأخراً بعيداً عن الدعوم
-        rsi < 65 and 
-        (macd >= signal or hist > 0) and 
-        volumes[-1] > (avg_volume * 0.6)
+        current_price > ema20 and 
+        45 < rsi < 65 and # منع الشراء في التشبع الشرائي أو الضعف الشديد
+        macd > signal and 
+        hist > 0 and 
+        volumes[-1] > avg_volume # شرط حجم تداول حقيقي لتأكيد الصعود
     )
     
-    # شروط البيع المحسنة (بدلاً من البيع العشوائي، تعتمد على كسر المتوسط السريع EMA9/20 أو هبوط RSI)
     sell_condition = (
-        current_price < ema50 or 
-        (rsi > 70 and macd < signal)
+        current_price < ema20 or 
+        rsi > 75 or 
+        (macd < signal and hist < 0)
     )
 
     if buy_condition:
@@ -210,7 +204,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     crypto = 0.0
     winning_trades = 0
     losing_trades = 0
-    fee_rate = 0.001  # عمولة منخفضة أو محسوبة بدقة
+    fee_rate = 0.001  
     entry_price = 0.0
     sl_price = 0.0
     tp_price = 0.0
@@ -230,22 +224,11 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if h > highest_price:
                 highest_price = h
                 current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
-                trailing_stop = highest_price - (current_atr * 2.0)
+                trailing_stop = highest_price - (current_atr * 2.5) # مسافة أوسع لمنع الخروج المبكر
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            if h >= tp_price and l <= sl_price:
-                revenue = crypto * sl_price
-                fee = revenue * fee_rate
-                balance += (revenue - fee)
-                losing_trades += 1
-                crypto = 0.0
-                entry_price = 0.0
-                sl_price = 0.0
-                tp_price = 0.0
-                highest_price = 0.0
-                continue
-            elif h >= tp_price:
+            if h >= tp_price:
                 revenue = crypto * tp_price
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
@@ -276,23 +259,23 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         atr_val = calculate_atr(sub_closes, sub_highs, sub_lows)
         avg_vol = sum(sub_vols[-20:]) / 20 if len(sub_vols) >= 20 else sub_vols[-1]
         
-        trend_filter = (p > ema200_val)
+        trend_filter = (p > ema200_val and ema50_val > ema200_val)
         buy_cond = (
             trend_filter and 
-            (p >= ema20_val or p >= ema50_val) and 
-            rsi < 65 and 
-            (macd >= signal or hist > 0) and 
-            sub_vols[-1] > (avg_vol * 0.6)
+            p > ema20_val and 
+            45 < rsi < 65 and 
+            macd > signal and 
+            hist > 0 and 
+            sub_vols[-1] > avg_vol
         )
-        sell_cond = (p < ema50_val or (rsi > 70 and macd < signal))
+        sell_cond = (p < ema20_val or rsi > 75 or (macd < signal and hist < 0))
 
         if buy_cond and balance > 10 and crypto == 0:
             total_equity = balance
-            risk_amount = total_equity * 0.015  # تخفيض المخاطرة إلى 1.5% للحفاظ على الأمان
-            stop_dist = atr_val * 2.0
+            risk_amount = total_equity * 0.02
+            stop_dist = atr_val * 2.5 # توسيع وقف الخسارة لحماية الصفقة من التذبذب العرضي
             
-            # تحسين حجم المركز ليصبح 20% - 25% من الرصيد بدلاً من 50% لمنع الخسائر الكبيرة
-            position_size_usdt = min(balance * 0.25, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.2
+            position_size_usdt = min(balance * 0.3, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.25
             
             fee = position_size_usdt * fee_rate
             effective_usdt = position_size_usdt - fee
@@ -305,7 +288,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             entry_price = actual_entry_price
             highest_price = p
             sl_price = p - stop_dist
-            tp_price = p + (stop_dist * 2.0)
+            tp_price = p + (stop_dist * 3.0) # زيادة الهدف ليكون العائد أضعاف المخاطرة
             
         elif crypto > 0 and sell_cond:
             revenue = crypto * p
@@ -328,7 +311,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بشامل التحسينات):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بشامل معالجة التذبذب):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -354,11 +337,10 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
 
                 if action == "BUY" and usdt >= 10:
                     total_equity = usdt + (btc * price)
-                    risk_amount = total_equity * 0.015
-                    stop_dist = (atr * 2.0) if atr > 0 else (price * 0.025)
+                    risk_amount = total_equity * 0.02
+                    stop_dist = (atr * 2.5) if atr > 0 else (price * 0.03)
                     
-                    # حجم مركز محسّن وآمن (25% كحد أقصى)
-                    position_size_usdt = min(usdt * 0.25, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.2
+                    position_size_usdt = min(usdt * 0.3, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.25
                     
                     fee = position_size_usdt * fee_rate
                     effective_usdt = position_size_usdt - fee
@@ -370,7 +352,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     new_usdt = usdt - position_size_usdt
                     new_btc = btc + amount
                     sl_price = price - stop_dist
-                    tp_price = price + (stop_dist * 2.0)
+                    tp_price = price + (stop_dist * 3.0)
                     
                     conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
                                  (new_usdt, new_btc, actual_entry_price, sl_price, tp_price, price, user_id))
@@ -409,7 +391,6 @@ def auto_trading_manager():
                     
                     for u_id in active_users:
                         pf = get_user_portfolio(u_id)
-                        
                         last_buy = pf['last_buy_price']
                         btc_amt = pf['btc_balance']
                         
@@ -431,7 +412,7 @@ def auto_trading_manager():
                         if last_buy > 0:
                             if high_p > highest:
                                 highest = high_p
-                                new_sl = highest - (atr * 2.0)
+                                new_sl = highest - (atr * 2.5)
                                 if new_sl > sl:
                                     sl = new_sl
                                     with db_lock:
@@ -439,17 +420,11 @@ def auto_trading_manager():
                                             with conn:
                                                 conn.execute("UPDATE portfolio SET highest_price_reached = ?, stop_loss_price = ? WHERE user_id = ?", (highest, sl, u_id))
                                         
-                            if high_p >= tp and tp > 0 and low_p <= sl and sl > 0:
-                                execute_trade_logic(u_id, "SELL", sl)
-                                continue
-                            elif high_p >= tp and tp > 0:
+                            if high_p >= tp and tp > 0:
                                 execute_trade_logic(u_id, "SELL", tp)
                                 continue
                             elif low_p <= sl and sl > 0:
                                 execute_trade_logic(u_id, "SELL", sl)
-                                continue
-                            elif (price >= tp and tp > 0) or (price <= sl and sl > 0):
-                                execute_trade_logic(u_id, "SELL", price)
                                 continue
                                 
                         if "شراء" in rec and pf['usdt_balance'] >= 10 and pf['btc_balance'] == 0:
@@ -473,7 +448,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم تحديث الكود ودمج كافة التحسينات الذكية (فلتر الاتجاه، إدارة المخاطر المحسنة، وشروط الدخول والخروج بدقة) بنجاح.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم تحديث الكود بالكامل وتعديل استراتيجية الفلترة لمنع الصفقات المتكررة الخاسرة.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -481,7 +456,7 @@ def show_analysis(message):
     if not d:
         bot.reply_to(message, "⚠️ تعذر الاتصال بالسوق حالياً، يرجى المحاولة بعد ثوانٍ.")
         return
-    res = f"📈 **التحليل الاحترافي المحدث والمطوّر (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA20: `{d['ema20']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200 (فلتر الاتجاه): `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
+    res = f"📈 **التحليل الاحترافي (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA20: `{d['ema20']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
@@ -491,7 +466,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالاستراتيجية المحسنة الجديدة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإعدادات الجديدة المحسنة!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
