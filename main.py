@@ -142,6 +142,23 @@ def calculate_atr(closes, highs, lows, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
+def adaptive_learning_multiplier(user_id):
+    """
+    🧠 ميزة التعلم من الأخطاء:
+    تفحص آخر 8 صفقات مغلقة للمستخدم. إذا كانت نسبة الخسارة عالية،
+    يقوم البوت بتعلم تقليل المخاطرة تلقائياً (تخفيض حجم المركز).
+    """
+    with db_lock:
+        with closing(get_db_connection()) as conn:
+            with conn:
+                trades = conn.execute("SELECT pnl FROM trades WHERE user_id = ? AND status = 'CLOSED' ORDER BY id DESC LIMIT 8", (user_id,)).fetchall()
+                if len(trades) >= 4:
+                    losses = [t['pnl'] for t in trades if t['pnl'] < 0]
+                    if len(losses) >= (len(trades) * 0.6):
+                        # اكتشف البوت سلسلة أخطاء/خسائر -> يتكيف ويقلل المخاطرة
+                        return 0.15 # تخفيض حجم المركز إلى 15% لتفادي الخسارة
+    return 0.25 # الحجم الافتراضي الآمن (25%)
+
 def full_technical_analysis(symbol="BTCUSDT"):
     closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=300)
     if not closes or len(closes) < 200:
@@ -156,28 +173,26 @@ def full_technical_analysis(symbol="BTCUSDT"):
     ema200 = calculate_ema_series(closes, 200)[-1]
     avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
     
-    # تحسين الشروط لمنع كثرة الصفقات العرضية الخاسرة
-    trend_filter = (current_price > ema200 and ema50 > ema200) # اتجاه صاعد قوي مؤكد
+    trend_filter = (current_price > ema200)
     
     buy_condition = (
         trend_filter and 
-        current_price > ema20 and 
-        45 < rsi < 65 and # منع الشراء في التشبع الشرائي أو الضعف الشديد
-        macd > signal and 
-        hist > 0 and 
-        volumes[-1] > avg_volume # شرط حجم تداول حقيقي لتأكيد الصعود
+        current_price >= ema20 and 
+        40 < rsi < 65 and 
+        (macd >= signal or hist > 0) and 
+        volumes[-1] > (avg_volume * 0.7)
     )
     
     sell_condition = (
-        current_price < ema20 or 
-        rsi > 75 or 
-        (macd < signal and hist < 0)
+        current_price < ema50 or 
+        rsi > 72 or 
+        (macd < signal)
     )
 
     if buy_condition:
-        recommendation = "شراء قوي 🟢"
+        recommendation = "شراء متوسط 🟢"
     elif sell_condition:
-        recommendation = "بيع قوي 🔴"
+        recommendation = "بيع متوسط 🔴"
     else:
         recommendation = "محايد / انتظار ⚪"
         
@@ -224,20 +239,25 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if h > highest_price:
                 highest_price = h
                 current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
-                trailing_stop = highest_price - (current_atr * 2.5) # مسافة أوسع لمنع الخروج المبكر
+                trailing_stop = highest_price - (current_atr * 2.2)
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            if h >= tp_price:
+            if h >= tp_price and l <= sl_price:
+                revenue = crypto * sl_price
+                fee = revenue * fee_rate
+                balance += (revenue - fee)
+                losing_trades += 1
+                crypto = 0.0
+                entry_price = sl_price = tp_price = highest_price = 0.0
+                continue
+            elif h >= tp_price:
                 revenue = crypto * tp_price
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
                 winning_trades += 1
                 crypto = 0.0
-                entry_price = 0.0
-                sl_price = 0.0
-                tp_price = 0.0
-                highest_price = 0.0
+                entry_price = sl_price = tp_price = highest_price = 0.0
                 continue
             elif l <= sl_price:
                 revenue = crypto * sl_price
@@ -245,10 +265,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
                 balance += (revenue - fee)
                 losing_trades += 1
                 crypto = 0.0
-                entry_price = 0.0
-                sl_price = 0.0
-                tp_price = 0.0
-                highest_price = 0.0
+                entry_price = sl_price = tp_price = highest_price = 0.0
                 continue
 
         rsi = calculate_rsi_standard(sub_closes)
@@ -259,23 +276,22 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         atr_val = calculate_atr(sub_closes, sub_highs, sub_lows)
         avg_vol = sum(sub_vols[-20:]) / 20 if len(sub_vols) >= 20 else sub_vols[-1]
         
-        trend_filter = (p > ema200_val and ema50_val > ema200_val)
+        trend_filter = (p > ema200_val)
         buy_cond = (
             trend_filter and 
-            p > ema20_val and 
-            45 < rsi < 65 and 
-            macd > signal and 
-            hist > 0 and 
-            sub_vols[-1] > avg_vol
+            p >= ema20_val and 
+            40 < rsi < 65 and 
+            (macd >= signal or hist > 0) and 
+            sub_vols[-1] > (avg_vol * 0.7)
         )
-        sell_cond = (p < ema20_val or rsi > 75 or (macd < signal and hist < 0))
+        sell_cond = (p < ema50_val or rsi > 72 or macd < signal)
 
         if buy_cond and balance > 10 and crypto == 0:
             total_equity = balance
-            risk_amount = total_equity * 0.02
-            stop_dist = atr_val * 2.5 # توسيع وقف الخسارة لحماية الصفقة من التذبذب العرضي
+            risk_amount = total_equity * 0.015
+            stop_dist = atr_val * 2.2
             
-            position_size_usdt = min(balance * 0.3, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.25
+            position_size_usdt = min(balance * 0.25, (risk_amount / stop_dist) * p) if stop_dist > 0 else balance * 0.2
             
             fee = position_size_usdt * fee_rate
             effective_usdt = position_size_usdt - fee
@@ -288,7 +304,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             entry_price = actual_entry_price
             highest_price = p
             sl_price = p - stop_dist
-            tp_price = p + (stop_dist * 3.0) # زيادة الهدف ليكون العائد أضعاف المخاطرة
+            tp_price = p + (stop_dist * 2.2) # نسبة متوسطة ومتوازنة للأهداف
             
         elif crypto > 0 and sell_cond:
             revenue = crypto * p
@@ -301,17 +317,14 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             else:
                 losing_trades += 1
             crypto = 0.0
-            entry_price = 0.0
-            sl_price = 0.0
-            tp_price = 0.0
-            highest_price = 0.0
+            entry_price = sl_price = tp_price = highest_price = 0.0
             
     total_trades = winning_trades + losing_trades
     win_rate = round((winning_trades / total_trades * 100), 2) if total_trades > 0 else 0.0
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسن (بشامل معالجة التذبذب):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي (صفقات متوسطة + تعلم ذاتي):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -336,11 +349,14 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     return
 
                 if action == "BUY" and usdt >= 10:
-                    total_equity = usdt + (btc * price)
-                    risk_amount = total_equity * 0.02
-                    stop_dist = (atr * 2.5) if atr > 0 else (price * 0.03)
+                    # تفعيل ميزة التعلم لتعديل حجم المركز حسب الأداء السابق
+                    dynamic_position_ratio = adaptive_learning_multiplier(user_id)
                     
-                    position_size_usdt = min(usdt * 0.3, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.25
+                    total_equity = usdt + (btc * price)
+                    risk_amount = total_equity * 0.015
+                    stop_dist = (atr * 2.2) if atr > 0 else (price * 0.025)
+                    
+                    position_size_usdt = min(usdt * dynamic_position_ratio, (risk_amount / stop_dist) * price) if stop_dist > 0 else usdt * 0.2
                     
                     fee = position_size_usdt * fee_rate
                     effective_usdt = position_size_usdt - fee
@@ -352,7 +368,7 @@ def execute_trade_logic(user_id, action, price, atr=0.0):
                     new_usdt = usdt - position_size_usdt
                     new_btc = btc + amount
                     sl_price = price - stop_dist
-                    tp_price = price + (stop_dist * 3.0)
+                    tp_price = price + (stop_dist * 2.2)
                     
                     conn.execute("UPDATE portfolio SET usdt_balance = ?, btc_balance = ?, last_buy_price = ?, stop_loss_price = ?, take_profit_price = ?, highest_price_reached = ? WHERE user_id = ?",
                                  (new_usdt, new_btc, actual_entry_price, sl_price, tp_price, price, user_id))
@@ -412,7 +428,7 @@ def auto_trading_manager():
                         if last_buy > 0:
                             if high_p > highest:
                                 highest = high_p
-                                new_sl = highest - (atr * 2.5)
+                                new_sl = highest - (atr * 2.2)
                                 if new_sl > sl:
                                     sl = new_sl
                                     with db_lock:
@@ -448,7 +464,7 @@ def main_keyboard():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم تحديث الكود بالكامل وتعديل استراتيجية الفلترة لمنع الصفقات المتكررة الخاسرة.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم دمج ميزة التعلم من الأخطاء والصفقات المتوسطة بنجاح في البوت.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
@@ -456,7 +472,7 @@ def show_analysis(message):
     if not d:
         bot.reply_to(message, "⚠️ تعذر الاتصال بالسوق حالياً، يرجى المحاولة بعد ثوانٍ.")
         return
-    res = f"📈 **التحليل الاحترافي (BTC/USDT):**\n\n💵 السعر الحالي: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA20: `{d['ema20']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
+    res = f"📈 **التحليل الفني (صفقات متوسطة):**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📉 EMA20: `{d['ema20']}`\n📉 EMA50: `{d['ema50']}`\n📉 EMA200: `{d['ema200']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
@@ -466,7 +482,7 @@ def backtest_cmd(message):
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإعدادات الجديدة المحسنة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بنجاح مع نظام التعلم التكيفي!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
@@ -481,7 +497,7 @@ def show_portfolio(message):
     loss = round(pf['daily_loss'], 2)
     closes, _, _, _ = fetch_klines_full("BTCUSDT", limit=5)
     cp = closes[-1] if closes else 0.0
-    res = f"💼 **محفظتك وحالة المخاطر:**\n\n💵 USDT: `${usdt}`\n🪙 BTC: `${btc}`\n🛡️ الخسارة اليومية: `${loss} / $50.0`\n📊 القيمة الإجمالية: `${round(usdt + (btc * cp), 2)}`"
+    res = f"💼 **محفظتك وحالة الحماية:**\n\n💵 USDT: `${usdt}`\n🪙 BTC: `${btc}`\n🛡️ الخسارة اليومية: `${loss} / $50.0`\n📊 القيمة الكلية: `${round(usdt + (btc * cp), 2)}`"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
@@ -512,5 +528,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت الاحترافي المحسّن يعمل الآن بكفاءة عالية...")
+print("🤖 البوت الاحترافي يعمل الآن مع نظام التعلم الذاتي وصفقات متوسطة...")
 bot.infinity_polling(skip_pending=True)
