@@ -10,12 +10,10 @@ from collections import defaultdict
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# 7. الأمان: استخدام متغيرات البيئة للتوكن
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8811018278:AAFded7ASv7bNnB6n0X5KiJUmJFw897wddE")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# معرف المستخدم المسموح له فقط باستخدام البوت (حماية الحسابات المتعددة)
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))  # ضع معرف تيليجرام الخاص بك هنا أو اتركه 0 للإلغاء
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 
 db_lock = threading.RLock()
 user_locks = defaultdict(threading.RLock)
@@ -49,7 +47,6 @@ def init_db():
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
-                # 6. إضافة فهارس لجدول trades لتسريع الاستعلامات
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_user_id ON trades(user_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
 
@@ -167,7 +164,6 @@ def calculate_atr(closes, highs, lows, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# 3 & 8. نظام التعلم الحقيقي الديناميكي: تقليل حجم المركز تلقائياً بناءً على تكرار الخسائر الأخيرة
 def adaptive_learning_multiplier(user_id):
     with db_lock:
         with closing(get_db_connection()) as conn:
@@ -177,13 +173,12 @@ def adaptive_learning_multiplier(user_id):
                     losses = [t['pnl'] for t in trades if t['pnl'] < 0]
                     loss_ratio = len(losses) / len(trades)
                     if loss_ratio >= 0.6:
-                        return 0.10  # تخفيض حاد للمخاطر في حال كثرة الخسائر
+                        return 0.10
                     elif loss_ratio >= 0.4:
                         return 0.15
     return 0.25
 
 def full_technical_analysis(symbol="BTCUSDT"):
-    # 5. دعم متعدد الأطر الزمنية الحقيقية (15m, 1h, 4h)
     _, closes_15m, highs_15m, lows_15m, volumes_15m = fetch_klines_full(symbol, interval="15m", limit=300)
     _, closes_1h, _, _, _ = fetch_klines_full(symbol, interval="1h", limit=200)
     _, closes_4h, _, _, _ = fetch_klines_full(symbol, interval="4h", limit=200)
@@ -203,7 +198,6 @@ def full_technical_analysis(symbol="BTCUSDT"):
     
     avg_volume = sum(volumes_15m[-20:]) / 20 if len(volumes_15m) >= 20 else volumes_15m[-1]
     
-    # فلاتر الاتجاه المتعددة للأطر الكبرى
     trend_up = (current_price > ema200_1h) and (closes_1h[-1] > ema50_4h)
 
     buy_condition = (
@@ -264,8 +258,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
         sub_lows = lows[:i]
         sub_vols = volumes[:i]
         
-        # 2. تلافي الانحياز المستقبلي (Lookahead Bias) بمحاذاة الفاصل الزمني للساعة بدقة حسب الوقت الحالي للشمعة
-        current_timestamp_index = i // 4  # تقريب تقريبي لمواءمة 15د مع 1س
+        current_timestamp_index = i // 4
         sub_closes_1h = closes_1h[:current_timestamp_index] if current_timestamp_index < len(closes_1h) else closes_1h
         if len(sub_closes_1h) < 50:
             continue
@@ -511,7 +504,6 @@ def main_keyboard():
     markup.row(KeyboardButton("📊 سجل الأرباح"))
     return markup
 
-# فحص الأمان للمستخدمين غير المصرح لهم
 def is_authorized(user_id):
     if ALLOWED_USER_ID == 0:
         return True
@@ -525,7 +517,8 @@ def send_welcome(message):
     get_user_portfolio(message.from_user.id)
     bot.reply_to(message, "أهلاً بك! تم تحديث البوت ومعالجة كافة عيوب الأداء، تدوير الأطر الزمنية، منع الانحياز، وتعزيز حماية الحسابات.", reply_markup=main_keyboard())
 
-@bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
+# استخدام المرونة في استقبال الأوامر لتجنب مشاكل الإيموجي
+@bot.message_handler(func=lambda m: "التحليل الفني والمؤشرات" in m.text)
 def show_analysis(message):
     if not is_authorized(message.from_user.id):
         return
@@ -536,27 +529,27 @@ def show_analysis(message):
     res = f"📈 **التحليل الفني متعدد الأطر:**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📈 EMA9: `{d['ema9']}`\n📈 EMA21: `{d['ema21']}`\n🌐 EMA200 (1h): `{d['ema200_1h']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
+@bot.message_handler(func=lambda m: "اختبار رجعي (Backtest)" in m.text)
 def backtest_cmd(message):
     if not is_authorized(message.from_user.id):
         return
     bot.reply_to(message, run_advanced_backtest("BTCUSDT"), parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
+@bot.message_handler(func=lambda m: "تفعيل التداول الآلي" in m.text)
 def start_auto(message):
     if not is_authorized(message.from_user.id):
         return
     user_trading_status[message.from_user.id] = True
     bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالنسخة المحسنة ضد المخاطر!")
 
-@bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
+@bot.message_handler(func=lambda m: "إيقاف التداول الآلي" in m.text)
 def stop_auto(message):
     if not is_authorized(message.from_user.id):
         return
     user_trading_status[message.from_user.id] = False
     bot.reply_to(message, "🛑 تم إيقاف التداول الآلي.")
 
-@bot.message_handler(func=lambda m: m.text == "💰 المحفظة")
+@bot.message_handler(func=lambda m: "المحفظة" in m.text)
 def show_portfolio(message):
     if not is_authorized(message.from_user.id):
         return
@@ -571,7 +564,7 @@ def show_portfolio(message):
     res = f"💼 **محفظتك وحالة الحماية:**\n\n💵 USDT: `${usdt}`\n🪙 BTC: `${btc}`\n🛡️ الخسارة اليومية: `${loss} / $50.0`\n📊 القيمة الكلية: `${round(usdt + (btc * live_price), 2)}`"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
+@bot.message_handler(func=lambda m: "بيع يدوي إضطراري" in m.text)
 def force_sell(message):
     if not is_authorized(message.from_user.id):
         return
@@ -587,7 +580,7 @@ def force_sell(message):
     else:
         bot.reply_to(message, "⚠️ تعذر جلب السعر الفعلي من السوق، حاول مرة أخرى.")
 
-@bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
+@bot.message_handler(func=lambda m: "سجل الأرباح" in m.text)
 def show_trades(message):
     if not is_authorized(message.from_user.id):
         return
@@ -605,5 +598,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت يعمل بكفاءة مع التعديلات الجذرية وتصحيح العيوب...")
+print("🤖 البوت يعمل بكفاءة تامة وتم حل مشكلة الأزرار...")
 bot.infinity_polling(skip_pending=True)
