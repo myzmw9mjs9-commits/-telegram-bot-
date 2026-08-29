@@ -10,7 +10,11 @@ from collections import defaultdict
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8811018278:AAFded7ASv7bNnB6n0X5KiJUmJFw897wddE")
+# جلب التوكن من متغيّر البيئة حصرياً للأمان
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("⚠️ خطأ: متغير البيئة BOT_TOKEN غير معدوس أو غير موجود!")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
@@ -517,7 +521,6 @@ def send_welcome(message):
     get_user_portfolio(message.from_user.id)
     bot.reply_to(message, "أهلاً بك! تم تحديث البوت ومعالجة كافة عيوب الأداء، تدوير الأطر الزمنية، منع الانحياز، وتعزيز حماية الحسابات.", reply_markup=main_keyboard())
 
-# استخدام المرونة في استقبال الأوامر لتجنب مشاكل الإيموجي
 @bot.message_handler(func=lambda m: "التحليل الفني والمؤشرات" in m.text)
 def show_analysis(message):
     if not is_authorized(message.from_user.id):
@@ -598,5 +601,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت يعمل بكفاءة تامة وتم حل مشكلة الأزرار...")
+print("🤖 البوت يعمل باستخدام متغير البيئة حصرياً...")
 bot.infinity_polling(skip_pending=True)
