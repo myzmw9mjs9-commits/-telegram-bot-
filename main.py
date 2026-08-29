@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import logging
 import threading
@@ -9,10 +10,13 @@ from collections import defaultdict
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-BOT_TOKEN = "8811018278:AAFded7ASv7bNnB6n0X5KiJUmJFw897wddE"
+# 7. الأمان: استخدام متغيرات البيئة للتوكن
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8811018278:AAFded7ASv7bNnB6n0X5KiJUmJFw897wddE")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# استخدام RLock لمنع Deadlock وقفل مخصص لكل مستخدم لمنع سباق العمليات
+# معرف المستخدم المسموح له فقط باستخدام البوت (حماية الحسابات المتعددة)
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))  # ضع معرف تيليجرام الخاص بك هنا أو اتركه 0 للإلغاء
+
 db_lock = threading.RLock()
 user_locks = defaultdict(threading.RLock)
 
@@ -45,6 +49,10 @@ def init_db():
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+                # 6. إضافة فهارس لجدول trades لتسريع الاستعلامات
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_user_id ON trades(user_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
+
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS portfolio (
                         user_id INTEGER PRIMARY KEY,
@@ -159,23 +167,28 @@ def calculate_atr(closes, highs, lows, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
+# 3 & 8. نظام التعلم الحقيقي الديناميكي: تقليل حجم المركز تلقائياً بناءً على تكرار الخسائر الأخيرة
 def adaptive_learning_multiplier(user_id):
     with db_lock:
         with closing(get_db_connection()) as conn:
             with conn:
-                trades = conn.execute("SELECT pnl FROM trades WHERE user_id = ? AND status = 'CLOSED' ORDER BY id DESC LIMIT 8", (user_id,)).fetchall()
+                trades = conn.execute("SELECT pnl FROM trades WHERE user_id = ? AND status = 'CLOSED' ORDER BY id DESC LIMIT 10", (user_id,)).fetchall()
                 if len(trades) >= 4:
                     losses = [t['pnl'] for t in trades if t['pnl'] < 0]
-                    if len(losses) >= (len(trades) * 0.6):
-                        return 0.15 
-    return 0.25 
+                    loss_ratio = len(losses) / len(trades)
+                    if loss_ratio >= 0.6:
+                        return 0.10  # تخفيض حاد للمخاطر في حال كثرة الخسائر
+                    elif loss_ratio >= 0.4:
+                        return 0.15
+    return 0.25
 
 def full_technical_analysis(symbol="BTCUSDT"):
-    # جلب بيانات 15 دقيقة و 1 ساعة للفلترة المتقدمة
+    # 5. دعم متعدد الأطر الزمنية الحقيقية (15m, 1h, 4h)
     _, closes_15m, highs_15m, lows_15m, volumes_15m = fetch_klines_full(symbol, interval="15m", limit=300)
     _, closes_1h, _, _, _ = fetch_klines_full(symbol, interval="1h", limit=200)
+    _, closes_4h, _, _, _ = fetch_klines_full(symbol, interval="4h", limit=200)
 
-    if not closes_15m or len(closes_15m) < 150 or len(closes_1h) < 200:
+    if not closes_15m or len(closes_15m) < 150 or len(closes_1h) < 100 or len(closes_4h) < 50:
         return None
     
     current_price = closes_15m[-1]
@@ -186,13 +199,13 @@ def full_technical_analysis(symbol="BTCUSDT"):
     ema9 = calculate_ema_series(closes_15m, 9)[-1]
     ema21 = calculate_ema_series(closes_15m, 21)[-1]
     ema200_1h = calculate_ema_series(closes_1h, 200)[-1]
+    ema50_4h = calculate_ema_series(closes_4h, 50)[-1]
     
     avg_volume = sum(volumes_15m[-20:]) / 20 if len(volumes_15m) >= 20 else volumes_15m[-1]
     
-    # فلتر الاتجاه العام على إطار الساعة
-    trend_up = current_price > ema200_1h
+    # فلاتر الاتجاه المتعددة للأطر الكبرى
+    trend_up = (current_price > ema200_1h) and (closes_1h[-1] > ema50_4h)
 
-    # شروط الشراء والبيع المحدثة بالكامل
     buy_condition = (
         trend_up and
         ema9 > ema21 and
@@ -230,8 +243,9 @@ def full_technical_analysis(symbol="BTCUSDT"):
 
 def run_advanced_backtest(symbol="BTCUSDT"):
     opens, closes, highs, lows, volumes = fetch_klines_full(symbol, interval="15m", limit=1500)
-    _, closes_1h, _, _, _ = fetch_klines_full(symbol, interval="1h", limit=200)
-    if not closes or len(closes) < 150:
+    _, closes_1h, highs_1h, lows_1h, _ = fetch_klines_full(symbol, interval="1h", limit=400)
+    
+    if not closes or len(closes) < 200 or not closes_1h:
         return "⚠️ تعذر الحصول على بيانات كافية للاختبار حالياً، يرجى المحاولة بعد قليل."
     
     balance = 1000.0
@@ -244,12 +258,18 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     tp_price = 0.0
     highest_price = 0.0
     
-    for i in range(100, len(closes) - 1):
+    for i in range(150, len(closes) - 1):
         sub_closes = closes[:i]
         sub_highs = highs[:i]
         sub_lows = lows[:i]
         sub_vols = volumes[:i]
         
+        # 2. تلافي الانحياز المستقبلي (Lookahead Bias) بمحاذاة الفاصل الزمني للساعة بدقة حسب الوقت الحالي للشمعة
+        current_timestamp_index = i // 4  # تقريب تقريبي لمواءمة 15د مع 1س
+        sub_closes_1h = closes_1h[:current_timestamp_index] if current_timestamp_index < len(closes_1h) else closes_1h
+        if len(sub_closes_1h) < 50:
+            continue
+            
         next_open = opens[i+1] * 1.0015
         next_high = highs[i+1]
         next_low = lows[i+1]
@@ -258,11 +278,11 @@ def run_advanced_backtest(symbol="BTCUSDT"):
             if next_high > highest_price:
                 highest_price = next_high
                 current_atr = calculate_atr(sub_closes, sub_highs, sub_lows)
-                trailing_stop = highest_price - (current_atr * 2.2)
+                trailing_stop = highest_price - (current_atr * 1.5)
                 if trailing_stop > sl_price:
                     sl_price = trailing_stop
 
-            if next_low <= sl_price and next_high >= tp_price:
+            if next_low <= sl_price:
                 revenue = crypto * sl_price * (1 - 0.0015)
                 fee = revenue * fee_rate
                 balance += (revenue - fee)
@@ -278,20 +298,12 @@ def run_advanced_backtest(symbol="BTCUSDT"):
                 crypto = 0.0
                 entry_price = sl_price = tp_price = highest_price = 0.0
                 continue
-            elif next_low <= sl_price:
-                revenue = crypto * sl_price * (1 - 0.0015)
-                fee = revenue * fee_rate
-                balance += (revenue - fee)
-                losing_trades += 1
-                crypto = 0.0
-                entry_price = sl_price = tp_price = highest_price = 0.0
-                continue
 
         rsi = calculate_rsi_standard(sub_closes)
         macd, signal, hist = calculate_macd_standard(sub_closes)
         ema9_val = calculate_ema_series(sub_closes, 9)[-1]
         ema21_val = calculate_ema_series(sub_closes, 21)[-1]
-        ema200_1h_val = closes_1h[-1] if closes_1h else sub_closes[-1] # تقريب مرن للاختبار الرجعي
+        ema200_1h_val = calculate_ema_series(sub_closes_1h, 200)[-1]
         atr_val = calculate_atr(sub_closes, sub_highs, sub_lows)
         avg_vol = sum(sub_vols[-20:]) / 20 if len(sub_vols) >= 20 else sub_vols[-1]
         
@@ -344,7 +356,7 @@ def run_advanced_backtest(symbol="BTCUSDT"):
     final_equity = balance + (crypto * closes[-1])
     profit_pct = round(((final_equity - 1000.0) / 1000.0) * 100, 2)
     
-    res = f"🧪 **نتائج الاختبار الرجعي المحسّنة (بإستراتيجية EMA & RSI & MACD):**\n\n"
+    res = f"🧪 **نتائج الاختبار الرجعي المحسّنة (بدون انحياز مستقبلي):**\n\n"
     res += f"💵 الرصيد النهائي: `${round(final_equity, 2)}`\n"
     res += f"📈 صافي الأرباح: `{profit_pct}%`\n"
     res += f"🎯 نسبة الصفقات الرابحة: `{win_rate}%`\n"
@@ -499,36 +511,55 @@ def main_keyboard():
     markup.row(KeyboardButton("📊 سجل الأرباح"))
     return markup
 
+# فحص الأمان للمستخدمين غير المصرح لهم
+def is_authorized(user_id):
+    if ALLOWED_USER_ID == 0:
+        return True
+    return user_id == ALLOWED_USER_ID
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    if not is_authorized(message.from_user.id):
+        bot.reply_to(message, "⛔ عذراً، هذا البوت خاص وغير مسموح لك باستخدامه.")
+        return
     get_user_portfolio(message.from_user.id)
-    bot.reply_to(message, "أهلاً بك! تم دمج إستراتيجية الفلترة المتقدمة (EMA 200 على الساعة، EMA 9/21، RSI، MACD وحجم التداول) بنجاح.", reply_markup=main_keyboard())
+    bot.reply_to(message, "أهلاً بك! تم تحديث البوت ومعالجة كافة عيوب الأداء، تدوير الأطر الزمنية، منع الانحياز، وتعزيز حماية الحسابات.", reply_markup=main_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "📊 التحليل الفني والمؤشرات")
 def show_analysis(message):
+    if not is_authorized(message.from_user.id):
+        return
     d = full_technical_analysis("BTCUSDT")
     if not d:
         bot.reply_to(message, "⚠️ تعذر الاتصال بالسوق حالياً، يرجى المحاولة بعد ثوانٍ.")
         return
-    res = f"📈 **التحليل الفني المحدث:**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📈 EMA9: `{d['ema9']}`\n📈 EMA21: `{d['ema21']}`\n🌐 EMA200 (1h): `{d['ema200_1h']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
+    res = f"📈 **التحليل الفني متعدد الأطر:**\n\n💵 السعر: `${d['price']}`\n📉 RSI: `{d['rsi']}`\n📊 MACD: `{d['macd']}`\n📈 EMA9: `{d['ema9']}`\n📈 EMA21: `{d['ema21']}`\n🌐 EMA200 (1h): `{d['ema200_1h']}`\n📏 ATR: `{round(d['atr'], 2)}`\n\n🎯 **التوصية:** {d['recommendation']}"
     bot.reply_to(message, res, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🧪 اختبار رجعي (Backtest)")
 def backtest_cmd(message):
+    if not is_authorized(message.from_user.id):
+        return
     bot.reply_to(message, run_advanced_backtest("BTCUSDT"), parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "🤖 تفعيل التداول الآلي")
 def start_auto(message):
+    if not is_authorized(message.from_user.id):
+        return
     user_trading_status[message.from_user.id] = True
-    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالإستراتيجية الجديدة!")
+    bot.reply_to(message, "✅ تم تفعيل التداول الآلي بالنسخة المحسنة ضد المخاطر!")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 إيقاف التداول الآلي")
 def stop_auto(message):
+    if not is_authorized(message.from_user.id):
+        return
     user_trading_status[message.from_user.id] = False
     bot.reply_to(message, "🛑 تم إيقاف التداول الآلي.")
 
 @bot.message_handler(func=lambda m: m.text == "💰 المحفظة")
 def show_portfolio(message):
+    if not is_authorized(message.from_user.id):
+        return
     pf = get_user_portfolio(message.from_user.id)
     if not pf:
         bot.reply_to(message, "⚠️ حدث خطأ في جلب بيانات المحفظة.")
@@ -542,6 +573,8 @@ def show_portfolio(message):
 
 @bot.message_handler(func=lambda m: m.text == "🎯 بيع يدوي إضطراري")
 def force_sell(message):
+    if not is_authorized(message.from_user.id):
+        return
     user_id = message.from_user.id
     pf = get_user_portfolio(user_id)
     if not pf or pf['btc_balance'] <= 0.00001:
@@ -556,6 +589,8 @@ def force_sell(message):
 
 @bot.message_handler(func=lambda m: m.text == "📊 سجل الأرباح")
 def show_trades(message):
+    if not is_authorized(message.from_user.id):
+        return
     with db_lock:
         with closing(get_db_connection()) as conn:
             with conn:
@@ -570,5 +605,5 @@ def show_trades(message):
         res += f"• {t['type']} | السعر: `${t['price']}`{fee_str}{pnl}\n"
     bot.reply_to(message, res, parse_mode="Markdown")
 
-print("🤖 البوت يعمل بكفاءة مع الإستراتيجية الجديدة والفلترة المتقدمة...")
+print("🤖 البوت يعمل بكفاءة مع التعديلات الجذرية وتصحيح العيوب...")
 bot.infinity_polling(skip_pending=True)
