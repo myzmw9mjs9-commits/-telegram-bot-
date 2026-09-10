@@ -4,7 +4,7 @@ import telebot
 TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
-  raise ValueError("⚠️ خطأ: متغير البيئة BOT_TOKEN غير موجود!")
+  raise ValueError("BOT_TOKEN environment variable is missing!")
 
 bot = telebot.TeleBot(TOKEN)
 
